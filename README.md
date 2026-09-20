@@ -14,7 +14,7 @@
 - Magic Brush / Stamp
 - PNG保存
 - Playwright E2E
-- Target: `v1.0`
+- Target: `v1.0.0`
 
 ## Development
 
@@ -34,12 +34,14 @@ npm run test:e2e
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [PoC analysis](docs/POC_ANALYSIS.md)
+- [Release](docs/RELEASE.md)
 
 ## Release path
 
 1. Android / Kindle実機でRelease Candidate品質を確認
 2. CI/CDとRelease運用を確立
 3. Android向け配布方式を確定
-4. v1.0を一般公開
+4. `v1.0.0-rc.N` を生成して公開前Acceptance
+5. `v1.0.0` を一般公開
 
 旧 `experimental` 側は移行元の履歴参照用として残し、新規開発PRはこのRepositoryで行います。
