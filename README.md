@@ -1,34 +1,45 @@
 # Kids Oekaki
 
-小学低学年向けのタブレットお絵かきアプリ。`oekaki_v2.html` PoCを、拡張可能なPWAアーキテクチャへ移行した初期コードベースです。
+子どもがタブレットで迷わず描き、作品を残せるお絵かきアプリです。
 
-## Included in v0.1 scaffold
-- まっしろ / 4コマまんが / えにっき
-- ペン / マーカー / けしごむ
-- 基本色 + カスタムカラー / 太さ1〜60
-- 動的レイヤー追加・削除・表示切替
-- Undo / Redo
-- PNG保存 (`toBlob`)
+2026-09-20に `cloud42-labo/experimental/kids-oekaki` から正式Product Repositoryへ移行しました。以後の開発・CI/CD・Release成果物のSSoTはこのRepositoryです。
+
+## Current state
+
+- Version: `0.13.5`
+- React + TypeScript + Vite + Canvas 2D
+- PWA / offline対応
 - Pointer Events + coalesced samples
-- PWA manifest + service worker
-- Stroke/Stampを保持できるDocumentモデル
+- Undo / Redo / Layer
+- Magic Brush / Stamp
+- PNG保存
+- Playwright E2E
+- Target: `v1.0`
 
-## Run
+## Development
+
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-## Build
+## Verification
+
 ```bash
 npm run build
-npm run preview
+npm run test:e2e
 ```
 
-## Next backlog
-1. Android/Kindle実機で描画・回転・保存・オフライン・パームリジェクションをE2E確認。
-2. レイヤー名変更・並び替え・ロック。
-3. レインボー/ネオンなどMagic Brush renderer。
-4. ハート/星/フキダシ/集中線スタンプUI。
-5. IndexedDB自動保存と作品一覧。
-6. Web入力制約が残る場合のみCapacitor 8 Android shellを追加。
+## Architecture
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [PoC analysis](docs/POC_ANALYSIS.md)
+
+## Release path
+
+1. Android / Kindle実機でRelease Candidate品質を確認
+2. CI/CDとRelease運用を確立
+3. Android向け配布方式を確定
+4. v1.0を一般公開
+
+旧 `experimental` 側は移行元の履歴参照用として残し、新規開発PRはこのRepositoryで行います。
