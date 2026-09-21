@@ -60,8 +60,10 @@ T03: Release build / 実機Smoke Test導線）はこの決定に従う。
 
 ## 署名 / Store公開Gate
 
-- T02/T03の時点では unsigned または debug 署名の installable APK を GitHub Actions
-  artifactとして生成するに留める（Store提出はしない）。
+- T02/T03の時点では **debug署名**のinstallable APKをGitHub Actions artifactとして
+  生成するに留める（Store提出はしない）。Androidのpackage managerはunsigned APKの
+  インストールを許可しないため、「unsigned」は選択肢に含めない。Capacitor/Android
+  Studioのdebug buildが自動生成するdebugキーストアでの署名をそのまま使う。
 - Release署名鍵（keystoreファイル・キーストアパスワード・キーエイリアスパスワード）は
   リポジトリにコミットせず、GitHub Secretsにのみ置く（各CLAUDE.mdの「秘密情報」原則と同一）。
   署名workflowはSecretsから読み込むjobとして、通常のCI/CDと分離する。
