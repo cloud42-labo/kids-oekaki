@@ -60,9 +60,18 @@ jobs:
           # debug build only (docs/ANDROID_DISTRIBUTION.md); unsigned APKs are not installable,
           # so this uses Capacitor/Android Studio's auto-generated debug keystore.
           ANDROID_VERSION_CODE: ${{ github.run_number }}
+      - name: Label APK with version/run for Human Acceptance traceability
+        id: apk
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          LABEL="kids-oekaki-v${VERSION}-debug-build${{ github.run_number }}"
+          mkdir -p android/app/build/outputs/apk/debug/labeled
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "android/app/build/outputs/apk/debug/labeled/${LABEL}.apk"
+          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: kids-oekaki-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: ${{ steps.apk.outputs.label }}
+          path: android/app/build/outputs/apk/debug/labeled/${{ steps.apk.outputs.label }}.apk
           if-no-files-found: error
