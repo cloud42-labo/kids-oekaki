@@ -36,6 +36,7 @@ npm run test:e2e
 - [PoC analysis](docs/POC_ANALYSIS.md)
 - [Release](docs/RELEASE.md)
 - [Android Distribution](docs/ANDROID_DISTRIBUTION.md)
+- [Android Acceptance (Human)](docs/ANDROID_ACCEPTANCE.md)
 
 ## Release path
 
