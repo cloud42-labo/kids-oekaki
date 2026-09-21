@@ -47,7 +47,10 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        # v3's default `packages` input requests the legacy `tools` package, which Google
+        # stopped serving from the SDK repository (2026-09-15). v4 defaults to `platform-tools`
+        # only; AGP resolves the compileSdk/build-tools it needs on its own.
+        uses: android-actions/setup-android@v4
       - name: Sync Capacitor Android project
         run: npm run android:sync
       - name: Assemble debug APK
