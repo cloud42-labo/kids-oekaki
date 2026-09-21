@@ -7,13 +7,17 @@
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "android:sync": "cap sync android"
   },
   "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.2",
     "@playwright/test": "1.56.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

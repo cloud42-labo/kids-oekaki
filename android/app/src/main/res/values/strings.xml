@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">おえかき</string>
+    <string name="title_activity_main">おえかき</string>
+    <string name="package_name">com.cloud42labo.kidsoekaki</string>
+    <string name="custom_url_scheme">com.cloud42labo.kidsoekaki</string>
+</resources>
