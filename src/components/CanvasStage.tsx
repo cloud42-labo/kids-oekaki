@@ -42,7 +42,17 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // 再現した）。ペン入力のレイテンシ低減は、この直後にあるrequestAnimationFrame
 // によるフレームバッチ処理（queueLiveSegments/flushLiveSegments）が既に主要な
 // 改善を担っているため、`desynchronized`は使わず標準の同期canvasへ戻す。
-const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d') ?? null;
+//
+// OEK-05-S03-BUG03: `alpha: false` はdesynchronizedと異なりtearing等の副作用が
+// 知られていない保守的な最適化で、ブラウザ/WebViewにこのcanvasがアルファ
+// チャンネルを持たないと伝え、毎フレームのアルファブレンド合成コストを省く。
+// renderDocument()は常にdrawTemplate()で不透明な背景（#fff等）を全面へ
+// fillRectしてから描画するため、このcanvas（メイン表示用）は常に不透明であり
+// 安全に指定できる（レイヤーごとのオフスクリーンサーフェスは消しゴムの
+// destination-out等でアルファが必須のため対象外、renderer.ts側は変更していない）。
+// 低スペックAndroid GPUでのコンポジットコストは、ペン入力のもたつき
+// （OEK-05-S03-BUG03）の一因になり得るため、低リスクな改善として適用する。
+const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d', { alpha: false }) ?? null;
 
 export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, onCommitStamp }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -207,19 +217,38 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     setViewport({ scale: nextScale, x, y });
   };
 
+  // OEK-05-S03-BUG03: 高速パス（RAFバッチ処理によるインクリメンタル描画）は
+  // これまで'pen'ブラシに限定されていた。'eraser'も同じ単色・単一composite
+  // ブラシのため安全に追加できる（destination-outは複数回の重ね塗りでも
+  // 「消える」結果が変わらず、境界での見た目のズレが生じない）。
+  // 'marker'は対象に含めない: alpha=0.3の半透明ストロークをRAFバッチ単位で
+  // 分割してstroke()すると、バッチの境界やストローク自身の自己交差部分で
+  // 透明度が重なり合い、低速パス（全体を1回のstroke()で描く）とは異なる
+  // 濃淡のズレ（アーティファクト）が生じ得るため。'rainbow'/'neon'は
+  // セグメント単位で色が変わる・多重描画があるため、単純な直線分割の
+  // 高速パスにそのまま乗せられない。
   const canUseLiveStroke = (stroke: StrokeObject) =>
     activeLayerIsTopmostVisible
-    && stroke.brush === 'pen'
+    && (stroke.brush === 'pen' || stroke.brush === 'eraser')
     && Math.abs((activeLayer?.opacity ?? 1) - 1) < 0.001;
 
+  // renderer.tsのdrawStroke()と同じブラシ別の設定（eraserはdestination-out・
+  // 不透明黒、それ以外はsource-over・本来の色）を、高速パスでも一致させる。
   const configureLiveStrokeContext = (ctx: CanvasRenderingContext2D, stroke: StrokeObject) => {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = stroke.size;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = stroke.color;
-    ctx.fillStyle = stroke.color;
-    ctx.globalAlpha = 1;
+    if (stroke.brush === 'eraser') {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#000';
+      ctx.fillStyle = '#000';
+    } else {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = stroke.color;
+      ctx.fillStyle = stroke.color;
+      ctx.globalAlpha = 1;
+    }
   };
 
   const drawLiveDot = (stroke: StrokeObject, point: Point) => {
