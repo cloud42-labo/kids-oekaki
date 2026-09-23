@@ -36,7 +36,21 @@ button { -webkit-tap-highlight-color: transparent; }
 .orientation-swatch-landscape { width: 88px; height: 62px; }
 .back-link { margin-top: 20px; border: 0; background: transparent; color: #756b79; font-weight: 800; font-size: 16px; padding: 8px; }
 
-.app-shell { width: 100%; height: 100%; display: flex; flex-direction: column; background: #dce6ea; }
+/* Androidのedge-to-edge描画（targetSdk 35+で既定）では、WebViewがシステムバーの
+   裏側まで含めた画面全体で描画されるため、ツールバー（先頭子要素）が
+   ステータスバーの、ワークスペース下端がナビゲーションバーの裏に回り込む。
+   *{box-sizing:border-box}のため、paddingを足してもheight:100%の合計サイズは
+   変わらず、内側のコンテンツ領域だけが安全域ぶん狭まる（OEK-05-S03-BUG02）。
+   env()は非対応環境・PWA/デスクトップでは0pxを返すため、既存表示は変化しない。 */
+.app-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #dce6ea;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
 .toolbar { min-height: 92px; padding: 8px 10px; display: flex; align-items: center; gap: 10px; overflow-x: auto; background: #fff; box-shadow: 0 3px 14px rgba(38,32,45,.14); z-index: 5; }
 .tool-section { display: flex; align-items: center; gap: 7px; padding-right: 10px; border-right: 2px dashed #eadce6; flex: 0 0 auto; }
 .tool-buttons { gap: 6px; }
@@ -87,6 +101,20 @@ button { -webkit-tap-highlight-color: transparent; }
 
 @media (max-width: 600px) and (orientation: portrait) {
   /* min(150px, 42vw)にして、canvasがviewport幅いっぱいに近い極小画面でも
-     オーバーレイの左端がcanvas中央を越えないようにする（描画面を致命的に塞がないため）。 */
-  .layer-panel { position: absolute; right: 8px; bottom: 8px; width: min(150px, 42vw); max-height: 45%; border: 0; border-radius: 18px; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+     オーバーレイの左端がcanvas中央を越えないようにする（描画面を致命的に塞がないため）。
+     bottom/rightにenv(safe-area-inset-*)を加算しているのは、position:absoluteが
+     ビューポート基準（初期包含ブロック）で解決されるため、.app-shellのpaddingでは
+     保護されないことに対応するため（OEK-05-S03-BUG02）。ジェスチャー/3ボタンいずれの
+     ナビゲーションバーでもボタンが隠れないよう、実際のinset値を加算する。
+     env()は非対応環境・PWA/デスクトップでは0pxを返すため、既存表示は変化しない。 */
+  .layer-panel {
+    position: absolute;
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    width: min(150px, 42vw);
+    max-height: 45%;
+    border: 0;
+    border-radius: 18px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.2);
+  }
 }
