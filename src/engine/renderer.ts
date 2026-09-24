@@ -1,5 +1,12 @@
-import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, StrokeObject } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, ImageObject, StrokeObject } from '../domain/drawing';
+import { IMAGE_HANDLE_VISUAL_RADIUS } from '../domain/drawing';
 import { drawTemplate } from '../domain/templates';
+
+export type ImageBox = { x: number; y: number; width: number; height: number };
+// While an image is selected (CanvasStage, 'image' tool mode), its box —
+// live values during a drag/resize, or its committed values while idle —
+// overrides the committed object and gets a selection outline + handle.
+export type ImageSelection = ImageBox & { id: string };
 
 type LayerCache = {
   canvas: HTMLCanvasElement;
@@ -45,6 +52,99 @@ function getBlurMaskSurface(width: number, height: number) {
   if (blurMaskSurface.width !== width) blurMaskSurface.width = width;
   if (blurMaskSurface.height !== height) blurMaskSurface.height = height;
   return blurMaskSurface;
+}
+
+// Imported photos are decoded once per src (data URL) and cached here,
+// never re-decoded per frame. Unlike layerSurfaces this is keyed by the
+// image bytes, not an object/layer id, so re-importing an identical photo
+// (or undo/redo across history entries that share the same src string)
+// reuses the same decoded element.
+const imageElements = new Map<string, HTMLImageElement>();
+
+function readyImageElement(src: string): HTMLImageElement | undefined {
+  const img = imageElements.get(src);
+  return img && img.complete && img.naturalWidth > 0 ? img : undefined;
+}
+
+// Starts (or reuses) decoding `src` and resolves once it can be drawn.
+// Used directly by utils/exportPng.ts so export never races a cold cache.
+export function preloadImageAsset(src: string): Promise<void> {
+  const existing = readyImageElement(src);
+  if (existing) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let img = imageElements.get(src);
+    if (!img) {
+      img = new Image();
+      img.decoding = 'async';
+      imageElements.set(src, img);
+      img.src = src;
+    }
+    img.addEventListener('load', () => resolve(), { once: true });
+    img.addEventListener('error', () => {
+      imageElements.delete(src);
+      reject(new Error('画像を読み込めませんでした'));
+    }, { once: true });
+  });
+}
+
+export async function preloadDocumentImages(document: DrawingDocument): Promise<void> {
+  const sources = new Set<string>();
+  for (const layer of document.layers) {
+    for (const object of layer.objects) {
+      if (object.type === 'image') sources.add(object.src);
+    }
+  }
+  // One broken image (corrupt data, unlikely but not impossible after a
+  // schema-tolerant restore) must not block the rest of the document from
+  // exporting/rendering.
+  await Promise.all(Array.from(sources).map((src) => preloadImageAsset(src).catch(() => undefined)));
+}
+
+// Returns the decoded element if ready, otherwise kicks off loading and
+// calls `onReady` once (deduped: only the first caller for a given src
+// attaches a listener) so the caller can trigger exactly one follow-up
+// redraw instead of polling.
+function getImageElement(src: string, onReady: () => void): HTMLImageElement | undefined {
+  const ready = readyImageElement(src);
+  if (ready) return ready;
+  if (!imageElements.has(src)) {
+    const img = new Image();
+    img.decoding = 'async';
+    img.addEventListener('load', onReady, { once: true });
+    img.addEventListener('error', () => imageElements.delete(src), { once: true });
+    imageElements.set(src, img);
+    img.src = src;
+  }
+  return undefined;
+}
+
+function drawImageObject(target: CanvasRenderingContext2D, object: ImageObject, box: ImageBox, onReady: () => void) {
+  const img = getImageElement(object.src, onReady);
+  if (!img) return; // not decoded yet — onReady triggers a follow-up render
+  target.save();
+  target.imageSmoothingEnabled = true;
+  target.imageSmoothingQuality = 'high';
+  target.drawImage(img, box.x, box.y, box.width, box.height);
+  target.restore();
+}
+
+function drawImageSelectionChrome(target: CanvasRenderingContext2D, box: ImageBox) {
+  target.save();
+  target.globalAlpha = 1;
+  target.setLineDash([10, 8]);
+  target.lineWidth = 3;
+  target.strokeStyle = '#3b82f6';
+  target.strokeRect(box.x, box.y, box.width, box.height);
+  target.setLineDash([]);
+
+  target.beginPath();
+  target.arc(box.x + box.width, box.y + box.height, IMAGE_HANDLE_VISUAL_RADIUS, 0, Math.PI * 2);
+  target.fillStyle = '#3b82f6';
+  target.fill();
+  target.lineWidth = 3;
+  target.strokeStyle = '#ffffff';
+  target.stroke();
+  target.restore();
 }
 
 function rainbowColor(hue: number) {
@@ -305,7 +405,9 @@ function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject,
 function renderObject(ctx: CanvasRenderingContext2D, object: DrawingObject, width: number, height: number) {
   if (object.type === 'stroke') drawStroke(ctx, object);
   else if (object.type === 'blur') applyBlur(ctx, object, width, height);
-  else drawStamp(ctx, object);
+  else if (object.type === 'stamp') drawStamp(ctx, object);
+  // 'image' objects are intentionally never rasterized into the cached
+  // layer surface — see the image-drawing loop in renderDocument below.
 }
 
 function renderLayer(ctx: CanvasRenderingContext2D, layer: DrawingLayer, width: number, height: number) {
@@ -336,6 +438,7 @@ export function renderDocument(
   target: CanvasRenderingContext2D,
   document: DrawingDocument,
   draftObject?: DrawingObject | null,
+  imageSelection?: ImageSelection | null,
 ) {
   pruneLayerCache(document);
   target.clearRect(0, 0, document.width, document.height);
@@ -343,10 +446,21 @@ export function renderDocument(
 
   for (const layer of document.layers) {
     if (!layer.visible) continue;
-    const surface = renderedLayerSurface(layer, document.width, document.height);
     target.save();
     target.globalAlpha = Math.max(0.1, Math.min(1, layer.opacity ?? 1));
 
+    // Images draw fresh every frame, under this layer's other (rasterized)
+    // content — a stroke drawn in the same layer, e.g. tracing directly on
+    // top of an imported reference, should stay visible above it. This also
+    // means a selected image can be dragged/resized (imageSelection
+    // override) without re-rendering the layer's cached bitmap at all.
+    for (const object of layer.objects) {
+      if (object.type !== 'image') continue;
+      const box: ImageBox = imageSelection && imageSelection.id === object.id ? imageSelection : object;
+      drawImageObject(target, object, box, () => renderDocument(target, document, draftObject, imageSelection));
+    }
+
+    const surface = renderedLayerSurface(layer, document.width, document.height);
     if (draftObject && layer.id === document.activeLayerId) {
       const preview = getDraftSurface(document.width, document.height);
       const previewCtx = preview.getContext('2d');
@@ -365,4 +479,6 @@ export function renderDocument(
     }
     target.restore();
   }
+
+  if (imageSelection) drawImageSelectionChrome(target, imageSelection);
 }

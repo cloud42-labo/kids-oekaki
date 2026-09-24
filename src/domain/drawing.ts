@@ -43,12 +43,36 @@ export type StampObject = {
   color: string;
 };
 
-export type DrawingObject = StrokeObject | BlurObject | StampObject;
+// A photo/reference picture imported into a layer to trace over. Unlike
+// strokes/stamps it is never rasterized into the layer's cached bitmap
+// (see engine/renderer.ts) so it can be repositioned/scaled after import
+// without re-rendering brush content. x/y is the top-left corner and
+// width/height the displayed size, all in canvas coordinate space (same
+// space as Point/StampObject) — independent of CanvasStage's viewport
+// zoom/pan, which only affects how that space is presented on screen.
+export type ImageObject = {
+  id: string;
+  type: 'image';
+  src: string; // downscaled data URL — see utils/importImage.ts
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
-export type ToolMode = 'brush' | 'stamp' | 'eyedropper';
+export type DrawingObject = StrokeObject | BlurObject | StampObject | ImageObject;
+
+export type ToolMode = 'brush' | 'stamp' | 'eyedropper' | 'image';
 
 export const STAMP_SIZE = 96;
 export const DEFAULT_BLUR_STRENGTH = 6;
+
+// On-canvas resize handle for a selected ImageObject (engine/renderer.ts
+// draws it, components/CanvasStage.tsx hit-tests against it). The hit
+// radius is larger than the visual one for touch-friendliness.
+export const IMAGE_HANDLE_VISUAL_RADIUS = 22;
+export const IMAGE_HANDLE_HIT_RADIUS = 34;
+export const IMAGE_MIN_SIZE = 40;
 
 export type DrawingLayer = {
   id: string;
@@ -57,6 +81,11 @@ export type DrawingLayer = {
   locked: boolean;
   opacity: number;
   objects: DrawingObject[];
+  // Marks the layer new photo imports land in (see
+  // useDrawingDocument#importDraftImage). Optional so older saved documents
+  // (no layer had this field) still load — they fall back to whichever
+  // layer is active at import time.
+  kind?: 'draft';
 };
 
 export type DrawingDocument = {
@@ -95,7 +124,7 @@ export function createInitialDocument(template: TemplateKind, orientation: Orien
     template,
     activeLayerId: lineId,
     layers: [
-      { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [] },
+      { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [], kind: 'draft' },
       { id: colorId, name: 'いろぬり', visible: true, locked: false, opacity: 1, objects: [] },
       { id: lineId, name: 'せんが', visible: true, locked: false, opacity: 1, objects: [] },
     ],

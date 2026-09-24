@@ -5,11 +5,14 @@ import { ColorPalette } from './components/ColorPalette';
 import { LayerPanel } from './components/LayerPanel';
 import { StartScreen } from './components/StartScreen';
 import { Toolbar } from './components/Toolbar';
-import type { Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import type { ImageObject, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import { preloadDocumentImages } from './engine/renderer';
+import type { ImageBox } from './engine/renderer';
 import { useDrawingDocument } from './state/useDrawingDocument';
 import { deleteDrawingSession, listDrawingSessions, renameDrawingSession, saveDrawingSession } from './utils/documentStorage';
 import type { StoredDrawingSession } from './utils/documentStorage';
 import { exportPng } from './utils/exportPng';
+import { loadDraftImageFile } from './utils/importImage';
 import './save-resume.css';
 import './creative-ui.css';
 
@@ -43,6 +46,8 @@ export default function App() {
     }
   });
   const [settings, setSettings] = useState<ToolSettings>(DEFAULT_SETTINGS);
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  const [imageImportError, setImageImportError] = useState<string>();
   const drawing = useDrawingDocument();
 
   useEffect(() => {
@@ -99,6 +104,7 @@ export default function App() {
   const start = (template: TemplateKind, orientation: Orientation) => {
     drawing.reset(template, orientation);
     setSettings(DEFAULT_SETTINGS);
+    setSelectedImageId(null);
     setActiveSessionId(crypto.randomUUID());
     setSaveState('idle');
     setStarted(true);
@@ -109,9 +115,43 @@ export default function App() {
     if (!session) return;
     drawing.restoreHistory(session.history);
     setSettings(session.settings ?? DEFAULT_SETTINGS);
+    setSelectedImageId(null);
     setActiveSessionId(session.id);
     setSaveState('saved');
     setStarted(true);
+    // Warm the decode cache so any draft-layer photo is ready to paint on
+    // the very first frame instead of popping in a moment later.
+    void preloadDocumentImages(session.history.present);
+  };
+
+  const importImage = async (file: File) => {
+    try {
+      setImageImportError(undefined);
+      const decoded = await loadDraftImageFile(file);
+      const maxWidth = drawing.document.width * 0.8;
+      const maxHeight = drawing.document.height * 0.8;
+      const scale = Math.min(maxWidth / decoded.naturalWidth, maxHeight / decoded.naturalHeight, 1);
+      const width = decoded.naturalWidth * scale;
+      const height = decoded.naturalHeight * scale;
+      const image: ImageObject = {
+        id: crypto.randomUUID(),
+        type: 'image',
+        src: decoded.src,
+        x: (drawing.document.width - width) / 2,
+        y: (drawing.document.height - height) / 2,
+        width,
+        height,
+      };
+      drawing.importDraftImage(image);
+      setSelectedImageId(image.id);
+      setSettings((current) => ({ ...current, mode: 'image' }));
+    } catch (error) {
+      setImageImportError(error instanceof Error ? error.message : '画像をとりこめませんでした。');
+    }
+  };
+
+  const updateImage = (id: string, box: ImageBox) => {
+    drawing.updateImageObject(id, box);
   };
 
   const returnToStart = async () => {
@@ -197,9 +237,11 @@ export default function App() {
         onReturnToStart={() => void returnToStart()}
         onSaveDraft={() => void saveCurrent(true)}
         onExportPng={() => void exportPng(drawing.document)}
+        onImportImage={(file) => void importImage(file)}
         saveState={saveState}
       />
       {storageError && <div className="save-error-banner" role="alert">⚠️ {storageError}</div>}
+      {imageImportError && <div className="save-error-banner" role="alert">⚠️ {imageImportError}</div>}
       <div className="workspace creative-workspace" onPointerDownCapture={handleColorPick}>
         <ColorPalette
           color={settings.color}
@@ -214,6 +256,9 @@ export default function App() {
           onCommitStroke={drawing.commitStroke}
           onCommitBlur={drawing.commitBlur}
           onCommitStamp={drawing.commitStamp}
+          selectedImageId={selectedImageId}
+          onSelectImage={setSelectedImageId}
+          onUpdateImage={updateImage}
         />
         <LayerPanel
           layers={drawing.document.layers}

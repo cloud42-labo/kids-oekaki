@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import type { BlurObject, DrawingDocument, DrawingLayer, Orientation, StampObject, StrokeObject, TemplateKind } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, DrawingLayer, ImageObject, Orientation, StampObject, StrokeObject, TemplateKind } from '../domain/drawing';
 import { createInitialDocument } from '../domain/drawing';
 
 const MAX_HISTORY = 60;
@@ -55,6 +55,49 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
   const commitStroke = useCallback((stroke: StrokeObject) => appendToActiveLayer(stroke), [appendToActiveLayer]);
   const commitBlur = useCallback((blur: BlurObject) => appendToActiveLayer(blur), [appendToActiveLayer]);
   const commitStamp = useCallback((stamp: StampObject) => appendToActiveLayer(stamp), [appendToActiveLayer]);
+
+  // Imported photos always land in the layer marked kind:'draft' (the
+  // したがき/"draft" layer created by createInitialDocument), regardless of
+  // which layer is currently active — that's the layer meant to be traced
+  // over. If it was deleted (a user can delete any layer down to the last
+  // one), fall back to the active layer so import never silently no-ops.
+  // The target layer is also made visible and selected so the new image
+  // and its existing opacity/show-hide/delete controls are immediately at
+  // hand (LayerPanel already exposes those per-layer, nothing new needed).
+  const importDraftImage = useCallback((image: ImageObject) => {
+    setHistory((h) => {
+      const draftLayer = h.present.layers.find((layer) => layer.kind === 'draft');
+      const targetId = draftLayer?.id ?? h.present.activeLayerId;
+      const target = h.present.layers.find((layer) => layer.id === targetId);
+      if (!target || target.locked) return h;
+      const layers = h.present.layers.map((layer) =>
+        layer.id === targetId ? { ...layer, visible: true, objects: [...layer.objects, image] } : layer,
+      );
+      return push(h, { ...h.present, layers, activeLayerId: targetId });
+    });
+  }, []);
+
+  // Commits a reposition/scale gesture once it ends (see CanvasStage's
+  // image-drag handling) — not on every pointermove, so dragging an image
+  // around doesn't flood the undo stack with near-duplicate history entries
+  // that would each carry a copy of its (already downscaled) data URL.
+  const updateImageObject = useCallback((imageId: string, patch: Pick<ImageObject, 'x' | 'y' | 'width' | 'height'>) => {
+    setHistory((h) => {
+      let changed = false;
+      const layers = h.present.layers.map((layer) => {
+        if (!layer.objects.some((object) => object.id === imageId && object.type === 'image')) return layer;
+        changed = true;
+        return {
+          ...layer,
+          objects: layer.objects.map((object) =>
+            object.id === imageId && object.type === 'image' ? { ...object, ...patch } : object,
+          ),
+        };
+      });
+      if (!changed) return h;
+      return push(h, { ...h.present, layers });
+    });
+  }, []);
 
   const addLayer = useCallback(() => {
     setHistory((h) => {
@@ -162,6 +205,8 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
     commitStroke,
     commitBlur,
     commitStamp,
+    importDraftImage,
+    updateImageObject,
     addLayer,
     deleteActiveLayer,
     clearActiveLayer,

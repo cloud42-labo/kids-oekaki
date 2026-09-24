@@ -1,7 +1,13 @@
 import type { DrawingDocument } from '../domain/drawing';
-import { renderDocument } from '../engine/renderer';
+import { preloadDocumentImages, renderDocument } from '../engine/renderer';
 
 export async function exportPng(document: DrawingDocument) {
+  // Guarantees any imported draft image is fully decoded before rasterizing,
+  // so export doesn't race the renderer's own lazy/self-healing image load
+  // (which is fine for interactive redraws but would silently omit an image
+  // from a PNG grabbed the instant the app loads or a session is restored).
+  await preloadDocumentImages(document);
+
   const canvas = window.document.createElement('canvas');
   canvas.width = document.width;
   canvas.height = document.height;

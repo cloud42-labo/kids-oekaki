@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ChangeEvent } from 'react';
 import type { BrushKind, StampKind, ToolSettings } from '../domain/drawing';
 
 const brushes: Array<{ key: BrushKind; icon: string; label: string }> = [
@@ -31,15 +32,22 @@ type Props = {
   onReturnToStart: () => void;
   onSaveDraft: () => void;
   onExportPng: () => void;
+  onImportImage: (file: File) => void;
   saveState: SaveState;
 };
 
-export function Toolbar({ settings, setSettings, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, saveState }: Props) {
+export function Toolbar({ settings, setSettings, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, onImportImage, saveState }: Props) {
   const toolbarRef = useRef<HTMLElement>(null);
   const stampMenuRef = useRef<HTMLDetailsElement>(null);
   const stampPopoverRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const [stampPopoverPosition, setStampPopoverPosition] = useState({ top: 76, left: VIEWPORT_MARGIN });
   const setBrush = (brush: BrushKind) => setSettings({ ...settings, mode: 'brush', brush });
+  const handleImageInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // allow re-selecting the same file next time
+    if (file) onImportImage(file);
+  };
   const setStamp = (stampKind: StampKind) => {
     setSettings({ ...settings, mode: 'stamp', stampKind });
     if (stampMenuRef.current) stampMenuRef.current.open = false;
@@ -109,6 +117,26 @@ export function Toolbar({ settings, setSettings, canUndo, canRedo, onUndo, onRed
             ))}
           </div>
         </details>
+
+        <button
+          type="button"
+          className={settings.mode === 'image' ? 'compact-tool active' : 'compact-tool'}
+          onClick={() => imageInputRef.current?.click()}
+          title="しゃしんをとりこむ"
+          aria-label="したがきに しゃしんをとりこむ"
+        >
+          <span className="compact-tool-icon" aria-hidden="true">🖼️</span>
+          <span className="compact-tool-label">しゃしん</span>
+        </button>
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleImageInputChange}
+          style={{ display: 'none' }}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
       </div>
 
       <label className="compact-size-control">
