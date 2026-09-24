@@ -78,6 +78,21 @@ export type ToolSettings = {
 
 const id = () => crypto.randomUUID();
 
+// ミラー描画モード: 中央軸(axisX、既定は canvas幅/2)を挟んで点を反転する。
+// プレビュー(ライブ描画)とコミット(Undo/Redo履歴・保存・PNG書き出し)の
+// 両方で必ずこの関数を通すことで、画面表示と保存結果が食い違わないようにする。
+export function mirrorPointAcrossAxis(point: Point, axisX: number): Point {
+  return { ...point, x: 2 * axisX - point.x };
+}
+
+export function mirrorStrokeAcrossAxis(stroke: StrokeObject, axisX: number): StrokeObject {
+  return {
+    ...stroke,
+    id: id(),
+    points: stroke.points.map((point) => mirrorPointAcrossAxis(point, axisX)),
+  };
+}
+
 export function createInitialDocument(template: TemplateKind, orientation: Orientation = 'portrait'): DrawingDocument {
   const sketchId = id();
   const colorId = id();

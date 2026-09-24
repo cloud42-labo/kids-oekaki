@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { BlurObject, DrawingDocument, Point, StampObject, StrokeObject, ToolSettings } from '../domain/drawing';
-import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE } from '../domain/drawing';
+import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
 import { renderDocument } from '../engine/renderer';
 
 type Props = {
   document: DrawingDocument;
   settings: ToolSettings;
+  mirrorEnabled: boolean;
   onCommitStroke: (stroke: StrokeObject) => void;
   onCommitBlur: (blur: BlurObject) => void;
   onCommitStamp: (stamp: StampObject) => void;
+  onCommitMirroredStroke: (stroke: StrokeObject, mirroredStroke: StrokeObject) => void;
 };
 
 type ScreenPoint = { x: number; y: number };
@@ -44,11 +46,15 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // 改善を担っているため、`desynchronized`は使わず標準の同期canvasへ戻す。
 const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d') ?? null;
 
-export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, onCommitStamp }: Props) {
+export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitStamp, onCommitMirroredStroke }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
   const [draft, setDraft] = useState<StrokeObject | BlurObject | null>(null);
+  // ミラー描画モード中、draftがstrokeのときだけ並走する「反転draft」。
+  // 元draftと同じ点を都度反転して積むだけで、プレビューとコミットの
+  // 変換ロジックを一本化する(mirrorPointAcrossAxis/mirrorStrokeAcrossAxis)。
+  const [mirrorDraft, setMirrorDraft] = useState<StrokeObject | null>(null);
   const liveStrokeRef = useRef<StrokeObject | null>(null);
   const pendingLivePointsRef = useRef<Point[]>([]);
   const liveFrameRef = useRef<number | null>(null);
@@ -74,8 +80,9 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     const canvas = canvasRef.current;
     const ctx = get2dContext(canvas);
     if (!canvas || !ctx) return;
-    renderDocument(ctx, document, draft);
-  }, [document, draft]);
+    const draftObjects = draft ? (mirrorDraft ? [draft, mirrorDraft] : [draft]) : null;
+    renderDocument(ctx, document, draftObjects);
+  }, [document, draft, mirrorDraft]);
 
   useEffect(() => () => {
     if (liveFrameRef.current !== null) cancelAnimationFrame(liveFrameRef.current);
@@ -127,6 +134,7 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
       restoreCommittedDocument();
     }
     setDraft(null);
+    setMirrorDraft(null);
   };
 
   const cancelPendingStamp = () => {
@@ -314,6 +322,16 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
       points: [point],
     };
 
+    if (mirrorEnabled) {
+      // ミラー描画モードでは、直接canvasへ描く高速pathを使わず必ずdraft
+      // (renderDocumentのpreview経由)にする。元strokeと反転strokeを同じ
+      // renderループで描くことで、画面表示とコミット結果の変換を一致させる。
+      const axisX = document.width / 2;
+      setDraft(stroke);
+      setMirrorDraft(mirrorStrokeAcrossAxis(stroke, axisX));
+      return;
+    }
+
     if (canUseLiveStroke(stroke)) {
       cancelLiveFrame();
       liveStrokeRef.current = stroke;
@@ -347,6 +365,11 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     }
 
     setDraft((current) => current ? { ...current, points: [...current.points, ...points] } : current);
+    if (mirrorDraft) {
+      const axisX = document.width / 2;
+      const mirroredPoints = points.map((point) => mirrorPointAcrossAxis(point, axisX));
+      setMirrorDraft((current) => current ? { ...current, points: [...current.points, ...mirroredPoints] } : current);
+    }
   };
 
   const stop = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -366,9 +389,16 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
       return;
     }
 
-    if (draft?.type === 'blur') onCommitBlur(draft);
-    else if (draft?.type === 'stroke') onCommitStroke(draft);
+    if (draft?.type === 'blur') {
+      onCommitBlur(draft);
+    } else if (draft?.type === 'stroke') {
+      // mirrorDraftがあれば、元strokeと反転strokeを1 Undo/Redo単位で
+      // まとめてコミットする(commitMirroredStroke側でhistory pushを1回に集約)。
+      if (mirrorDraft) onCommitMirroredStroke(draft, mirrorDraft);
+      else onCommitStroke(draft);
+    }
     setDraft(null);
+    setMirrorDraft(null);
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -450,6 +480,7 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
           onPointerCancel={handlePointerCancel}
           onContextMenu={(event) => event.preventDefault()}
         />
+        {mirrorEnabled && <div className="mirror-axis-guide" aria-hidden="true" />}
       </div>
       <div className="zoom-controls" aria-label="ズームそうさ">
         <button

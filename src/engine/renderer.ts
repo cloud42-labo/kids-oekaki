@@ -335,7 +335,11 @@ function pruneLayerCache(document: DrawingDocument) {
 export function renderDocument(
   target: CanvasRenderingContext2D,
   document: DrawingDocument,
-  draftObject?: DrawingObject | null,
+  // 通常のdraft(描画中の未コミットobject)は1件だが、ミラー描画モードでは
+  // 「元のstroke」と「反転したstroke」の2件を同時にpreviewする必要があるため配列で受け取る。
+  // exportPng/サムネイル生成では渡されない(=document layersのみが描かれ、
+  // ガイド線などdraft由来の要素は一切含まれない)。
+  draftObjects?: DrawingObject[] | null,
 ) {
   pruneLayerCache(document);
   target.clearRect(0, 0, document.width, document.height);
@@ -347,7 +351,7 @@ export function renderDocument(
     target.save();
     target.globalAlpha = Math.max(0.1, Math.min(1, layer.opacity ?? 1));
 
-    if (draftObject && layer.id === document.activeLayerId) {
+    if (draftObjects && draftObjects.length > 0 && layer.id === document.activeLayerId) {
       const preview = getDraftSurface(document.width, document.height);
       const previewCtx = preview.getContext('2d');
       if (!previewCtx) {
@@ -358,7 +362,9 @@ export function renderDocument(
       previewCtx.globalCompositeOperation = 'source-over';
       previewCtx.globalAlpha = 1;
       previewCtx.drawImage(surface, 0, 0);
-      renderObject(previewCtx, draftObject, document.width, document.height);
+      for (const draftObject of draftObjects) {
+        renderObject(previewCtx, draftObject, document.width, document.height);
+      }
       target.drawImage(preview, 0, 0);
     } else {
       target.drawImage(surface, 0, 0);
