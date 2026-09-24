@@ -218,9 +218,19 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
   };
 
   // OEK-05-S03-BUG03: 高速パス（RAFバッチ処理によるインクリメンタル描画）は
-  // これまで'pen'ブラシに限定されていた。'eraser'も同じ単色・単一composite
-  // ブラシのため安全に追加できる（destination-outは複数回の重ね塗りでも
-  // 「消える」結果が変わらず、境界での見た目のズレが生じない）。
+  // 'pen'ブラシに限定する。一度'eraser'にも拡張したが、この高速パスは
+  // get2dContext()経由でメイン表示用canvas（{alpha:false}、レイヤー合成を
+  // 経由しない1枚のflattenedな不透明canvas）へ直接destination-outを描く。
+  // alpha:falseのcanvasはアルファチャンネルを保持できないため、消しゴムで
+  // 作られるはずの透明部分を表現できず、ストローク中（pointer-up前）だけ
+  // 黒などの不正な色で表示される回帰を生んだ（Codexレビュー指摘P1、
+  // e2e/pen-eraser-live-path.spec.tsはpointer-up後のみ検証していたため
+  // 検知できなかった）。低速パス（setDraft経由のrenderDocument）は
+  // renderer.tsのgetDraftSurface（alpha:trueのオフスクリーンcanvas）上で
+  // destination-outしてからdrawImageでtargetへ合成するため、ストローク中も
+  // 正しくレイヤー下を透過して見せられる。'eraser'を高速パスへ再度含める
+  // 場合は、この合成経路（アルファ対応のオーバーレイ/レイヤーへライブ描画
+  // する）を高速パス側にも用意すること。
   // 'marker'は対象に含めない: alpha=0.3の半透明ストロークをRAFバッチ単位で
   // 分割してstroke()すると、バッチの境界やストローク自身の自己交差部分で
   // 透明度が重なり合い、低速パス（全体を1回のstroke()で描く）とは異なる
@@ -229,26 +239,19 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
   // 高速パスにそのまま乗せられない。
   const canUseLiveStroke = (stroke: StrokeObject) =>
     activeLayerIsTopmostVisible
-    && (stroke.brush === 'pen' || stroke.brush === 'eraser')
+    && stroke.brush === 'pen'
     && Math.abs((activeLayer?.opacity ?? 1) - 1) < 0.001;
 
-  // renderer.tsのdrawStroke()と同じブラシ別の設定（eraserはdestination-out・
-  // 不透明黒、それ以外はsource-over・本来の色）を、高速パスでも一致させる。
+  // 高速パスは'pen'限定（上のcanUseLiveStroke参照）。renderer.tsのdrawStroke()の
+  // pen設定（source-over・本来の色・不透明）と一致させる。
   const configureLiveStrokeContext = (ctx: CanvasRenderingContext2D, stroke: StrokeObject) => {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = stroke.size;
-    if (stroke.brush === 'eraser') {
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = '#000';
-      ctx.fillStyle = '#000';
-    } else {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = stroke.color;
-      ctx.fillStyle = stroke.color;
-      ctx.globalAlpha = 1;
-    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = stroke.color;
+    ctx.fillStyle = stroke.color;
+    ctx.globalAlpha = 1;
   };
 
   const drawLiveDot = (stroke: StrokeObject, point: Point) => {
