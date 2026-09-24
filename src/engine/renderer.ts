@@ -100,21 +100,28 @@ export async function preloadDocumentImages(document: DrawingDocument): Promise<
   await Promise.all(Array.from(sources).map((src) => preloadImageAsset(src).catch(() => undefined)));
 }
 
-// Returns the decoded element if ready, otherwise kicks off loading and
-// calls `onReady` once (deduped: only the first caller for a given src
-// attaches a listener) so the caller can trigger exactly one follow-up
-// redraw instead of polling.
+// Returns the decoded element if ready, otherwise ensures decoding is under
+// way and calls `onReady` once it completes, so the caller can trigger
+// exactly one follow-up redraw instead of polling. The underlying Image may
+// already have been created by an earlier, unrelated caller — e.g.
+// preloadDocumentImages() warming the cache on session resume, whose own
+// promise-based listener doesn't touch the canvas — so the `onReady`
+// listener is attached on every call that finds the src not yet ready
+// rather than only when this call is the one creating the Image. `once:
+// true` still means each attached listener fires (and is removed) exactly
+// once.
 function getImageElement(src: string, onReady: () => void): HTMLImageElement | undefined {
   const ready = readyImageElement(src);
   if (ready) return ready;
-  if (!imageElements.has(src)) {
-    const img = new Image();
+  let img = imageElements.get(src);
+  if (!img) {
+    img = new Image();
     img.decoding = 'async';
-    img.addEventListener('load', onReady, { once: true });
     img.addEventListener('error', () => imageElements.delete(src), { once: true });
     imageElements.set(src, img);
     img.src = src;
   }
+  img.addEventListener('load', onReady, { once: true });
   return undefined;
 }
 

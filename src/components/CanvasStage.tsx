@@ -106,6 +106,12 @@ export function CanvasStage({
     if (settings.mode !== 'image' || !selectedImageId) return null;
     if (imagePreview) return { id: selectedImageId, ...imagePreview };
     for (const layer of document.layers) {
+      // Mirrors findImageAt: a hidden or locked layer's image can't be
+      // selected/shown/resized — if it became hidden/locked after selection
+      // (e.g. via the layer panel), the selection chrome and handle must
+      // disappear along with it rather than keeping a stale outline the
+      // user can still drag.
+      if (!layer.visible || layer.locked) continue;
       const object = layer.objects.find(
         (candidate): candidate is ImageObject => candidate.type === 'image' && candidate.id === selectedImageId,
       );
@@ -451,12 +457,18 @@ export function CanvasStage({
         // the handle further out grows the image, closer in shrinks it.
         const startDist = Math.max(1, Math.hypot(imageDrag.startBox.width, imageDrag.startBox.height));
         const currentDist = Math.hypot(point.x - imageDrag.startBox.x, point.y - imageDrag.startBox.y);
-        const scale = clamp(currentDist / startDist, MIN_IMAGE_SCALE_FACTOR, MAX_IMAGE_SCALE_FACTOR);
+        // Clamp the scale factor itself — not width/height independently —
+        // so the box keeps its aspect ratio. IMAGE_MIN_SIZE must bound
+        // whichever original side is smaller, since that side reaches the
+        // floor first as the box shrinks; deriving both dimensions from
+        // that one clamped scale keeps them proportional.
+        const minScale = IMAGE_MIN_SIZE / Math.min(imageDrag.startBox.width, imageDrag.startBox.height);
+        const scale = Math.max(minScale, clamp(currentDist / startDist, MIN_IMAGE_SCALE_FACTOR, MAX_IMAGE_SCALE_FACTOR));
         setImagePreview({
           x: imageDrag.startBox.x,
           y: imageDrag.startBox.y,
-          width: Math.max(IMAGE_MIN_SIZE, imageDrag.startBox.width * scale),
-          height: Math.max(IMAGE_MIN_SIZE, imageDrag.startBox.height * scale),
+          width: imageDrag.startBox.width * scale,
+          height: imageDrag.startBox.height * scale,
         });
       }
       return;
