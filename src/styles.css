@@ -102,15 +102,25 @@ button { -webkit-tap-highlight-color: transparent; }
 @media (max-width: 600px) and (orientation: portrait) {
   /* min(150px, 42vw)にして、canvasがviewport幅いっぱいに近い極小画面でも
      オーバーレイの左端がcanvas中央を越えないようにする（描画面を致命的に塞がないため）。
-     bottom/rightにenv(safe-area-inset-*)を加算しているのは、position:absoluteが
-     ビューポート基準（初期包含ブロック）で解決されるため、.app-shellのpaddingでは
-     保護されないことに対応するため（OEK-05-S03-BUG02）。ジェスチャー/3ボタンいずれの
-     ナビゲーションバーでもボタンが隠れないよう、実際のinset値を加算する。
+
+     .layer-panelのposition:absoluteは、直近の位置指定祖先である.workspace
+     （creative-ui.cssの.creative-workspaceでposition:relativeが付与される、
+     .app-shellではない）のpadding boxを基準に解決される。.workspaceはpadding
+     を持たないため、.app-shellのpadding-bottom（safe-area-inset-bottom分）は
+     flexboxのサイズ計算を通じて.workspace自体の高さ・下端位置に既に反映済み
+     ——つまりbottom方向のinsetは.app-shellのpaddingで既に1回吸収されている。
+     ここでさらにenv(safe-area-inset-bottom)を加算すると二重適用になり、パネルが
+     必要以上に上へ浮く（OEK-05-S03-BUG02のCodexレビュー指摘）。bottomは8px固定でよい。
+
+     一方rightは.app-shell・.workspaceのどちらもinset-right分のpaddingを
+     持たないため、ここでのenv(safe-area-inset-right)加算が唯一の適用箇所であり
+     二重適用にならない。ジェスチャー/3ボタンいずれのナビゲーションバーでも右側の
+     ボタンが隠れないよう、実際のinset値を加算したままにする。
      env()は非対応環境・PWA/デスクトップでは0pxを返すため、既存表示は変化しない。 */
   .layer-panel {
     position: absolute;
     right: calc(8px + env(safe-area-inset-right, 0px));
-    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    bottom: 8px;
     width: min(150px, 42vw);
     max-height: 45%;
     border: 0;

@@ -32,10 +32,14 @@ test.describe('safe-area-inset対応（システムバー回避）', () => {
     expect(viewport).not.toBeNull();
     if (!box || !viewport) return;
 
-    // レイヤーパネルの下端が、ビューポート下端からinset-bottom(48px)以上
-    // 内側にあること（＝ナビゲーションバーの裏に回り込んでいないこと）。
+    // レイヤーパネルの下端は、ビューポート下端からinset-bottom(48px)+自身のオフセット
+    // (8px)=56px前後にあるべき（＝ナビゲーションバーの裏に回り込んでおらず、かつ
+    // insetを二重適用して必要以上に浮いてもいない）。下限だけのアサーション
+    // （>=48）だと二重適用（実測104px）も通ってしまい回帰を検知できなかったため
+    // （OEK-05-S03-BUG02のCodexレビュー指摘）、上限も合わせて確認する。
     const distanceFromBottom = viewport.height - (box.y + box.height);
     expect(distanceFromBottom).toBeGreaterThanOrEqual(48);
+    expect(distanceFromBottom).toBeLessThanOrEqual(64);
 
     // レイヤー追加/表示切替など、パネル内の操作ボタンも同様に安全域の内側にある。
     const addLayerButton = layerPanel.getByRole('button').first();
