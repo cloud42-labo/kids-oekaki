@@ -61,9 +61,40 @@ function getBlurMaskSurface(width: number, height: number) {
 // reuses the same decoded element.
 const imageElements = new Map<string, HTMLImageElement>();
 
+// The redraw ("onReady") callback most recently registered for a src that's
+// still decoding — see getImageElement below. Also doubles as "a `load`
+// listener is already attached for this src" so callers never stack more
+// than one native listener per source.
+const pendingRedraws = new Map<string, () => void>();
+
 function readyImageElement(src: string): HTMLImageElement | undefined {
   const img = imageElements.get(src);
   return img && img.complete && img.naturalWidth > 0 ? img : undefined;
+}
+
+// Drops decode-cache entries (and any still-pending redraw callback) for
+// sources no longer referenced by any image object in `document`. Without
+// this, every successful import/undo/delete/new-drawing leaves its decoded
+// HTMLImageElement (up to ~10MB for a max-size photo) and data URL parked
+// in imageElements for the rest of the app's lifetime, which adds up over a
+// long session. Called on every renderDocument — same pattern as
+// pruneLayerCache — so it stays in sync with whatever document is actually
+// on screen; undo/redo across a src that's temporarily out of the present
+// document just costs a re-decode if it comes back, which is cheap for a
+// single reference photo.
+function pruneImageCache(document: DrawingDocument) {
+  const liveSrcs = new Set<string>();
+  for (const layer of document.layers) {
+    for (const object of layer.objects) {
+      if (object.type === 'image') liveSrcs.add(object.src);
+    }
+  }
+  for (const src of imageElements.keys()) {
+    if (!liveSrcs.has(src)) {
+      imageElements.delete(src);
+      pendingRedraws.delete(src);
+    }
+  }
 }
 
 // Starts (or reuses) decoding `src` and resolves once it can be drawn.
@@ -105,11 +136,20 @@ export async function preloadDocumentImages(document: DrawingDocument): Promise<
 // exactly one follow-up redraw instead of polling. The underlying Image may
 // already have been created by an earlier, unrelated caller — e.g.
 // preloadDocumentImages() warming the cache on session resume, whose own
-// promise-based listener doesn't touch the canvas — so the `onReady`
-// listener is attached on every call that finds the src not yet ready
-// rather than only when this call is the one creating the Image. `once:
-// true` still means each attached listener fires (and is removed) exactly
-// once.
+// promise-based listener doesn't touch the canvas — so a redraw callback is
+// tracked on every call that finds the src not yet ready, rather than only
+// when this call is the one creating the Image (regressing the "restored
+// image never redraws" fix). But while a cold image is decoding, every
+// render of it reaches this function again — moving the selection chrome
+// alone can call it many times a second — so a *native* `load` listener is
+// only ever attached once per src (guarded by pendingRedraws already having
+// an entry); each subsequent call just replaces the pending callback with
+// its own, more current one. Whichever caller asked most recently "wins"
+// and is the one invoked when decoding finishes, which is enough: firing it
+// triggers a fresh renderDocument() against current state anyway, so there
+// is nothing extra to gain from also firing the stale ones — and, unlike
+// before, decoding no longer queues up dozens of redundant full-canvas
+// redraws in a single frame once it finally completes.
 function getImageElement(src: string, onReady: () => void): HTMLImageElement | undefined {
   const ready = readyImageElement(src);
   if (ready) return ready;
@@ -117,11 +157,21 @@ function getImageElement(src: string, onReady: () => void): HTMLImageElement | u
   if (!img) {
     img = new Image();
     img.decoding = 'async';
-    img.addEventListener('error', () => imageElements.delete(src), { once: true });
+    img.addEventListener('error', () => {
+      imageElements.delete(src);
+      pendingRedraws.delete(src);
+    }, { once: true });
     imageElements.set(src, img);
     img.src = src;
   }
-  img.addEventListener('load', onReady, { once: true });
+  if (!pendingRedraws.has(src)) {
+    img.addEventListener('load', () => {
+      const callback = pendingRedraws.get(src);
+      pendingRedraws.delete(src);
+      callback?.();
+    }, { once: true });
+  }
+  pendingRedraws.set(src, onReady);
   return undefined;
 }
 
@@ -448,6 +498,7 @@ export function renderDocument(
   imageSelection?: ImageSelection | null,
 ) {
   pruneLayerCache(document);
+  pruneImageCache(document);
   target.clearRect(0, 0, document.width, document.height);
   drawTemplate(target, document.template, document.width, document.height);
 

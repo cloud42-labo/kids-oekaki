@@ -56,6 +56,96 @@ function isCloseToRed(color: { r: number; g: number; b: number }, tolerance = 25
   return Math.abs(color.r - RED.r) <= tolerance && Math.abs(color.g - RED.g) <= tolerance && Math.abs(color.b - RED.b) <= tolerance;
 }
 
+// #1971c2 — used as a stand-in "existing line art" stroke color in the
+// legacy-document regression test below, distinct enough from RED/white to
+// assert on confidently.
+const BLUE = { r: 25, g: 113, b: 194 };
+
+function isCloseToColor(color: { r: number; g: number; b: number }, target: { r: number; g: number; b: number }, tolerance = 25) {
+  return Math.abs(color.r - target.r) <= tolerance && Math.abs(color.g - target.g) <= tolerance && Math.abs(color.b - target.b) <= tolerance;
+}
+
+// Writes a StoredDrawingSession (utils/documentStorage.ts) straight into
+// IndexedDB, bypassing the app's own save path entirely, so the document
+// shape can be pinned to exactly what createInitialDocument produced
+// *before* draft layers (kind: 'draft') existed: schemaVersion 2 (unchanged
+// by this PR — kind is an optional field, not a schema bump) but no layer
+// anywhere carries `kind: 'draft'`. Must run (via page.evaluate) after a
+// navigation has let the app open the 'kids-oekaki' DB at least once, and a
+// page.reload() afterwards is what makes App's mount-time
+// listDrawingSessions() (App.tsx) actually pick the seeded row up.
+async function seedLegacyDrawingSession(page: Page, id: string) {
+  await page.evaluate((sessionId) => {
+    const sketchId = 'legacy-sketch';
+    const colorId = 'legacy-color';
+    const lineId = 'legacy-line';
+    const session = {
+      schemaVersion: 2,
+      id: sessionId,
+      name: 'legacy',
+      savedAt: new Date().toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: 800,
+          height: 1131,
+          orientation: 'portrait',
+          template: 'blank',
+          // Active layer is せんが (line art), not したがき — this is what
+          // makes the pre-fix fallback (activeLayerId) misplace an imported
+          // photo onto the user's line art instead of the sketch layer.
+          activeLayerId: lineId,
+          layers: [
+            { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [] },
+            { id: colorId, name: 'いろぬり', visible: true, locked: false, opacity: 1, objects: [] },
+            {
+              id: lineId,
+              name: 'せんが',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              // Stands in for the user's real line art, to prove the fix
+              // doesn't disturb it.
+              objects: [
+                {
+                  id: 'legacy-stroke',
+                  type: 'stroke',
+                  brush: 'pen',
+                  color: '#1971c2',
+                  size: 20,
+                  points: [
+                    { x: 100, y: 80, pressure: 1 },
+                    { x: 700, y: 80, pressure: 1 },
+                  ],
+                },
+              ],
+            },
+          ],
+          // Intentionally no `kind: 'draft'` on any layer above — the exact
+          // shape ensureDraftLayer() (domain/drawing.ts) must migrate.
+        },
+      },
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('kids-oekaki', 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction('drawing-sessions', 'readwrite');
+        tx.objectStore('drawing-sessions').put(session, `draft:${sessionId}`);
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => reject(tx.error ?? new Error('failed to seed legacy session'));
+      };
+      request.onerror = () => reject(request.error ?? new Error('failed to open db'));
+    });
+  }, id);
+}
+
 // Delays every `HTMLImageElement.src` assignment on the page by `delayMs`
 // before it actually reaches the native setter (so `.complete` stays false
 // and no decode/load starts until then), without changing any other Image
@@ -329,5 +419,121 @@ test.describe('draft layer image import', () => {
     // shrunk to the 200x200 box test ③ produces with a real resize.
     await expect.poll(async () => isCloseToRed(await canvasColorAt(page, 300, 470))).toBe(true);
     await expect.poll(async () => isCloseToRed(await canvasColorAt(page, 500, 650))).toBe(true);
+  });
+
+  // Codex review findings on the follow-up commit (reviewed commit
+  // 32d8d65a33), fixed in a second follow-up commit: domain/drawing.ts's
+  // new ensureDraftLayer() migration, and engine/renderer.ts's redraw
+  // coalescing / decode-cache pruning.
+
+  test('⑩ kind:draftのない旧形式の保存データを開いて画像を取り込んでも、したがきレイヤーへ入る', async ({ page }) => {
+    // Regression test for the P1 finding: every session saved before this
+    // PR has no layer with kind: 'draft' at all (the field didn't exist
+    // yet), so importDraftImage's `layers.find(l => l.kind === 'draft')`
+    // used to find nothing and fall back to activeLayerId — here
+    // deliberately seeded as せんが (the "existing line art" layer) — so an
+    // imported photo's opacity/visibility/clear/delete would then also
+    // apply to the user's real line art. ensureDraftLayer() must infer and
+    // tag the したがき layer by name on restore so the import still lands
+    // in the right place.
+    await page.goto('/');
+    await seedLegacyDrawingSession(page, 'legacy-session-1');
+    await page.reload();
+
+    await page.locator('.saved-work-open').first().click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // The seeded "line art" (blue stroke on せんが) survived the restore
+    // untouched.
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(true);
+
+    await importSamplePhoto(page);
+
+    // Landed on したがき — not on せんが, which was the active layer at
+    // import time and is exactly where the pre-fix fallback would have put
+    // it.
+    await expect(page.locator('.layer-row', { hasText: 'したがき' })).toHaveClass(/active/);
+
+    // Hiding せんが (the pre-existing line-art layer) must NOT hide the
+    // photo — before the fix, the photo would have been appended to this
+    // very layer's objects, so hiding it would have hidden the photo too.
+    const lineRow = page.locator('.layer-row', { hasText: 'せんが' });
+    await lineRow.getByRole('button', { name: 'かくす' }).click();
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(false); // stroke hidden
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(true); // photo unaffected
+    await lineRow.getByRole('button', { name: 'みせる' }).click();
+
+    // Hiding したがき (where the photo actually landed) DOES hide the
+    // photo, and leaves the unrelated line-art layer's content untouched.
+    const draftRow = page.locator('.layer-row', { hasText: 'したがき' });
+    await draftRow.getByRole('button', { name: 'かくす' }).click();
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(true);
+  });
+
+  test('⑪ 読み込み中に何度も再描画されても、デコード完了後に一度だけ正しく表示される', async ({ page }) => {
+    // Regression test for the P2 redraw-coalescing finding: getImageElement
+    // used to attach a fresh `load` listener on every render call made
+    // while a src was still decoding, so lots of renders during a slow
+    // decode (here: repeatedly toggling the layer's opacity while the
+    // artificially-delayed decode is in flight) would queue up many
+    // listeners that all fire synchronously once decoding finishes. This
+    // can't directly observe listener count from outside the module, but it
+    // does confirm the coalesced callback still fires reliably exactly
+    // when needed — the fix must not trade the frame-stall away for a
+    // missed redraw (the P1 regression from the *previous* review round,
+    // covered by test ⑦).
+    await installDelayedImageDecoding(page, 300);
+
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    await page.reload();
+    await page.locator('.saved-work-open').first().click();
+
+    // Force several extra renders (each one re-enters getImageElement while
+    // the src is still "not yet ready") during the ~300ms decode window,
+    // instead of the single render test ⑦ relies on.
+    for (let i = 0; i < 5; i += 1) {
+      await page.getByRole('button', { name: '🪶 うすく' }).click();
+      await page.getByRole('button', { name: '● ふつう' }).click();
+    }
+
+    // Once decoding finishes, the photo must still appear on its own —
+    // no further interaction here forces a redraw.
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(true);
+  });
+
+  test('⑫ 画像をけしてから別の画像を取り込んでも問題なく表示される（デコードキャッシュの破棄後の再取り込み）', async ({ page }) => {
+    // Regression test for the P2 unbounded-decode-cache finding: pruneImageCache()
+    // (engine/renderer.ts) now drops an image src from the module-level
+    // decode cache once nothing in the current document references it any
+    // more (e.g. after ぜんぶけす clears the layer it was on). Real-device
+    // long-session memory behavior is a Human Gate item and isn't asserted
+    // here — this instead confirms the functional side: importing a new
+    // photo after the old one's cache entry was pruned still decodes and
+    // displays correctly (i.e. pruning doesn't leave the renderer in a
+    // broken state for the next import).
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(true);
+
+    // したがき is active post-import (see test ①); clearing it drops the
+    // ImageObject from the document, making its src unreachable and
+    // eligible for pruning on the next render.
+    await page.getByRole('button', { name: '🧹 ぜんぶけす' }).click();
+    // pruneImageCache() runs inside renderDocument on every document
+    // mutation, so by the time this poll observes the clear having taken
+    // effect on screen, the old src is already unreachable from the
+    // document and eligible for eviction.
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+
+    // A different photo (non-square panorama fixture) imports and displays
+    // correctly after the prune — nothing about evicting the old cache
+    // entry breaks decoding a new one.
+    await importPanoramaPhoto(page);
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, 565))).toBe(true);
   });
 });

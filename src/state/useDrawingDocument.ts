@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import type { BlurObject, DrawingDocument, DrawingLayer, ImageObject, Orientation, StampObject, StrokeObject, TemplateKind } from '../domain/drawing';
-import { createInitialDocument } from '../domain/drawing';
+import { createInitialDocument, ensureDraftLayer } from '../domain/drawing';
 
 const MAX_HISTORY = 60;
 
@@ -29,11 +29,17 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
     setHistory({ past: [], present: createInitialDocument(template, orientation), future: [] });
   }, []);
 
+  // Every past/present/future snapshot is migrated the same way (not just
+  // present): undo/redo can bring back a pre-migration snapshot from a
+  // document saved before draft layers existed, and importDraftImage always
+  // reads h.present at call time, so an unmigrated snapshot reached via undo
+  // would reintroduce the same misplaced-import bug. ensureDraftLayer is a
+  // no-op for documents that already have a kind:'draft' layer.
   const restoreHistory = useCallback((saved: DrawingHistory) => {
     setHistory({
-      past: saved.past.slice(-MAX_HISTORY),
-      present: saved.present,
-      future: saved.future.slice(0, MAX_HISTORY),
+      past: saved.past.slice(-MAX_HISTORY).map(ensureDraftLayer),
+      present: ensureDraftLayer(saved.present),
+      future: saved.future.slice(0, MAX_HISTORY).map(ensureDraftLayer),
     });
   }, []);
 

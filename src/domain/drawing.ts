@@ -130,3 +130,30 @@ export function createInitialDocument(template: TemplateKind, orientation: Orien
     ],
   };
 }
+
+// Documents saved before the draft-image-import feature landed have no
+// layer carrying kind:'draft' at all (the field didn't exist yet), so a
+// naive `layers.find(l => l.kind === 'draft')` fails for every one of them
+// — importDraftImage's fallback then appends the imported photo to
+// whichever layer happens to be active (normally 'せんが'), letting the
+// photo's opacity/visibility/clear/delete affect the user's real line art.
+// Layer names are fixed at creation (createInitialDocument only, no rename
+// UI — see components/LayerPanel.tsx) and never change afterward, so
+// matching the したがき name is a reliable signal even after the user has
+// reordered layers (moveActiveLayer swaps array positions) or deleted
+// others. Only if that named layer itself was deleted do we fall back to
+// the bottom-most remaining layer (index 0), which is where
+// createInitialDocument always placed it and the array position that
+// renderer.ts/moveActiveLayer treat as "back of the stack" — the next best
+// invariant. Called at every restore/resume so it applies regardless of
+// when the document was originally saved; a no-op once a layer already
+// carries kind: 'draft' (including brand-new documents).
+export function ensureDraftLayer(document: DrawingDocument): DrawingDocument {
+  if (document.layers.some((layer) => layer.kind === 'draft')) return document;
+  const target = document.layers.find((layer) => layer.name === 'したがき') ?? document.layers[0];
+  if (!target) return document;
+  return {
+    ...document,
+    layers: document.layers.map((layer) => (layer.id === target.id ? { ...layer, kind: 'draft' as const } : layer)),
+  };
+}
