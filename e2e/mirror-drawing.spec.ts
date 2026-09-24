@@ -98,10 +98,7 @@ test.describe('ミラー描画モード', () => {
 
     await drawStroke(page, 0.2, 0.3, 0.5);
 
-    await expect.poll(async () => readPixel(page, 0.2, 0.4)).toEqual(
-      expect.arrayContaining([expect.any(Number)]),
-    );
-    expect(isDarkStroke(await readPixel(page, 0.2, 0.4))).toBe(true);
+    await expect.poll(async () => isDarkStroke(await readPixel(page, 0.2, 0.4))).toBe(true);
     expect(isDarkStroke(await readPixel(page, 0.8, 0.4))).toBe(true);
     // 中心(ガイド線があるはずの列)はcanvasには何も描かれていない。
     expect(isBlankWhite(await readPixel(page, 0.5, 0.4))).toBe(true);
