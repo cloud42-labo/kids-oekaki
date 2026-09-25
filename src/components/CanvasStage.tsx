@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { BlurObject, DrawingDocument, Point, StampObject, StrokeObject, ToolSettings } from '../domain/drawing';
-import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE } from '../domain/drawing';
+import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
 import { renderDocument } from '../engine/renderer';
 
 type Props = {
   document: DrawingDocument;
   settings: ToolSettings;
+  mirrorEnabled: boolean;
   onCommitStroke: (stroke: StrokeObject) => void;
   onCommitBlur: (blur: BlurObject) => void;
   onCommitStamp: (stamp: StampObject) => void;
+  onCommitMirroredStroke: (stroke: StrokeObject, mirroredStroke: StrokeObject) => void;
 };
 
 type ScreenPoint = { x: number; y: number };
@@ -42,14 +44,35 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // 再現した）。ペン入力のレイテンシ低減は、この直後にあるrequestAnimationFrame
 // によるフレームバッチ処理（queueLiveSegments/flushLiveSegments）が既に主要な
 // 改善を担っているため、`desynchronized`は使わず標準の同期canvasへ戻す。
-const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d') ?? null;
+//
+// OEK-05-S03-BUG03: `alpha: false` はdesynchronizedと異なりtearing等の副作用が
+// 知られていない保守的な最適化で、ブラウザ/WebViewにこのcanvasがアルファ
+// チャンネルを持たないと伝え、毎フレームのアルファブレンド合成コストを省く。
+// renderDocument()は常にdrawTemplate()で不透明な背景（#fff等）を全面へ
+// fillRectしてから描画するため、このcanvas（メイン表示用）は常に不透明であり
+// 安全に指定できる（レイヤーごとのオフスクリーンサーフェスは消しゴムの
+// destination-out等でアルファが必須のため対象外、renderer.ts側は変更していない）。
+// 低スペックAndroid GPUでのコンポジットコストは、ペン入力のもたつき
+// （OEK-05-S03-BUG03）の一因になり得るため、低リスクな改善として適用する。
+const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d', { alpha: false }) ?? null;
 
-export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, onCommitStamp }: Props) {
+export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitStamp, onCommitMirroredStroke }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
   const [draft, setDraft] = useState<StrokeObject | BlurObject | null>(null);
+  // ミラー描画モード中、draftがstrokeのときだけ並走する「反転draft」。
+  // 高速path(liveStrokeRef/mirrorLiveStrokeRef、下記)が使えないブラシ・
+  // レイヤー状態でのフォールバックにのみ使う。元draftと同じ点を都度反転して
+  // 積むだけで、プレビューとコミットの変換ロジックを一本化する
+  // (mirrorPointAcrossAxis/mirrorStrokeAcrossAxis)。
+  const [mirrorDraft, setMirrorDraft] = useState<StrokeObject | null>(null);
   const liveStrokeRef = useRef<StrokeObject | null>(null);
+  // ミラー描画モードで高速path(liveStrokeRef)が使えるとき、元strokeと並走する
+  // 反転strokeの「進行中」オブジェクト。pendingLivePointsRefに積んだ元座標を
+  // flush時にmirrorPointAcrossAxisで反転して描くだけなので、専用のpending
+  // 配列は持たない(元pointsから毎回導出すれば十分かつ一致が保証される)。
+  const mirrorLiveStrokeRef = useRef<StrokeObject | null>(null);
   const pendingLivePointsRef = useRef<Point[]>([]);
   const liveFrameRef = useRef<number | null>(null);
   const lastPenAt = useRef(0);
@@ -74,8 +97,9 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     const canvas = canvasRef.current;
     const ctx = get2dContext(canvas);
     if (!canvas || !ctx) return;
-    renderDocument(ctx, document, draft);
-  }, [document, draft]);
+    const draftObjects = draft ? (mirrorDraft ? [draft, mirrorDraft] : [draft]) : null;
+    renderDocument(ctx, document, draftObjects);
+  }, [document, draft, mirrorDraft]);
 
   useEffect(() => () => {
     if (liveFrameRef.current !== null) cancelAnimationFrame(liveFrameRef.current);
@@ -124,9 +148,11 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     if (liveStrokeRef.current) {
       cancelLiveFrame();
       liveStrokeRef.current = null;
+      mirrorLiveStrokeRef.current = null;
       restoreCommittedDocument();
     }
     setDraft(null);
+    setMirrorDraft(null);
   };
 
   const cancelPendingStamp = () => {
@@ -207,11 +233,33 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     setViewport({ scale: nextScale, x, y });
   };
 
+  // OEK-05-S03-BUG03: 高速パス（RAFバッチ処理によるインクリメンタル描画）は
+  // 'pen'ブラシに限定する。一度'eraser'にも拡張したが、この高速パスは
+  // get2dContext()経由でメイン表示用canvas（{alpha:false}、レイヤー合成を
+  // 経由しない1枚のflattenedな不透明canvas）へ直接destination-outを描く。
+  // alpha:falseのcanvasはアルファチャンネルを保持できないため、消しゴムで
+  // 作られるはずの透明部分を表現できず、ストローク中（pointer-up前）だけ
+  // 黒などの不正な色で表示される回帰を生んだ（Codexレビュー指摘P1、
+  // e2e/pen-eraser-live-path.spec.tsはpointer-up後のみ検証していたため
+  // 検知できなかった）。低速パス（setDraft経由のrenderDocument）は
+  // renderer.tsのgetDraftSurface（alpha:trueのオフスクリーンcanvas）上で
+  // destination-outしてからdrawImageでtargetへ合成するため、ストローク中も
+  // 正しくレイヤー下を透過して見せられる。'eraser'を高速パスへ再度含める
+  // 場合は、この合成経路（アルファ対応のオーバーレイ/レイヤーへライブ描画
+  // する）を高速パス側にも用意すること。
+  // 'marker'は対象に含めない: alpha=0.3の半透明ストロークをRAFバッチ単位で
+  // 分割してstroke()すると、バッチの境界やストローク自身の自己交差部分で
+  // 透明度が重なり合い、低速パス（全体を1回のstroke()で描く）とは異なる
+  // 濃淡のズレ（アーティファクト）が生じ得るため。'rainbow'/'neon'は
+  // セグメント単位で色が変わる・多重描画があるため、単純な直線分割の
+  // 高速パスにそのまま乗せられない。
   const canUseLiveStroke = (stroke: StrokeObject) =>
     activeLayerIsTopmostVisible
     && stroke.brush === 'pen'
     && Math.abs((activeLayer?.opacity ?? 1) - 1) < 0.001;
 
+  // 高速パスは'pen'限定（上のcanUseLiveStroke参照）。renderer.tsのdrawStroke()の
+  // pen設定（source-over・本来の色・不透明）と一致させる。
   const configureLiveStrokeContext = (ctx: CanvasRenderingContext2D, stroke: StrokeObject) => {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -256,6 +304,16 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     pendingLivePointsRef.current = [];
     if (!stroke || points.length === 0) return;
     drawLiveSegments(stroke, points);
+    // ミラー描画モードで高速pathを使っている場合、同じ点バッチを反転して
+    // 反転strokeにも同じフレームで描く。draft/setStateを経由せず、元strokeと
+    // 全く同じ`mirrorPointAcrossAxis`変換をここでも使うことで、プレビューと
+    // コミット結果(mirrorStrokeAcrossAxis)を一致させる。
+    const mirroredStroke = mirrorLiveStrokeRef.current;
+    if (mirroredStroke) {
+      const axisX = document.width / 2;
+      const mirroredPoints = points.map((point) => mirrorPointAcrossAxis(point, axisX));
+      drawLiveSegments(mirroredStroke, mirroredPoints);
+    }
   };
 
   const queueLiveSegments = (points: Point[]) => {
@@ -315,9 +373,34 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     };
 
     if (canUseLiveStroke(stroke)) {
+      // 最上位・不透明レイヤーへのpen strokeは、ミラー描画モードの有無に
+      // 関わらず直接canvasへ描く高速path(liveStrokeRef)を使う。ミラー時は
+      // 反転strokeもmirrorLiveStrokeRefで並走させ、同じフレームバッチ
+      // (queueLiveSegments/flushLiveSegments)で一緒に描く。draft/setState
+      // 経由のフル再描画(renderDocument replay)はポインタ移動のたびには
+      // 発生させない。
       cancelLiveFrame();
       liveStrokeRef.current = stroke;
       drawLiveDot(stroke, point);
+      if (mirrorEnabled) {
+        const axisX = document.width / 2;
+        const mirroredStroke = mirrorStrokeAcrossAxis(stroke, axisX);
+        mirrorLiveStrokeRef.current = mirroredStroke;
+        drawLiveDot(mirroredStroke, mirroredStroke.points[0]);
+      } else {
+        mirrorLiveStrokeRef.current = null;
+      }
+      return;
+    }
+
+    if (mirrorEnabled) {
+      // 高速pathが使えないブラシ(pen以外)や非最上位/半透明レイヤーの
+      // ときだけ、従来通りdraft(renderDocumentのpreview経由)にフォール
+      // バックする。元strokeと反転strokeを同じrenderループで描くことで、
+      // 画面表示とコミット結果の変換を一致させる。
+      const axisX = document.width / 2;
+      setDraft(stroke);
+      setMirrorDraft(mirrorStrokeAcrossAxis(stroke, axisX));
       return;
     }
 
@@ -347,6 +430,11 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     }
 
     setDraft((current) => current ? { ...current, points: [...current.points, ...points] } : current);
+    if (mirrorDraft) {
+      const axisX = document.width / 2;
+      const mirroredPoints = points.map((point) => mirrorPointAcrossAxis(point, axisX));
+      setMirrorDraft((current) => current ? { ...current, points: [...current.points, ...mirroredPoints] } : current);
+    }
   };
 
   const stop = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -362,13 +450,27 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
       }
       flushLiveSegments();
       liveStrokeRef.current = null;
-      onCommitStroke(liveStroke);
+      const mirroredLiveStroke = mirrorLiveStrokeRef.current;
+      mirrorLiveStrokeRef.current = null;
+      // 高速pathでミラー描画していた場合も、元strokeと反転strokeを1回の
+      // commitMirroredStroke呼び出し(=1 Undo/Redo単位)でまとめてコミット
+      // する。ポインタ移動中にonCommitStroke/onCommitMirroredStrokeを
+      // 呼ばないのが、この高速pathの前提。
+      if (mirroredLiveStroke) onCommitMirroredStroke(liveStroke, mirroredLiveStroke);
+      else onCommitStroke(liveStroke);
       return;
     }
 
-    if (draft?.type === 'blur') onCommitBlur(draft);
-    else if (draft?.type === 'stroke') onCommitStroke(draft);
+    if (draft?.type === 'blur') {
+      onCommitBlur(draft);
+    } else if (draft?.type === 'stroke') {
+      // mirrorDraftがあれば、元strokeと反転strokeを1 Undo/Redo単位で
+      // まとめてコミットする(commitMirroredStroke側でhistory pushを1回に集約)。
+      if (mirrorDraft) onCommitMirroredStroke(draft, mirrorDraft);
+      else onCommitStroke(draft);
+    }
     setDraft(null);
+    setMirrorDraft(null);
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -450,6 +552,7 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
           onPointerCancel={handlePointerCancel}
           onContextMenu={(event) => event.preventDefault()}
         />
+        {mirrorEnabled && <div className="mirror-axis-guide" aria-hidden="true" />}
       </div>
       <div className="zoom-controls" aria-label="ズームそうさ">
         <button
