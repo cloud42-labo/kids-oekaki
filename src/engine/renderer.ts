@@ -511,9 +511,26 @@ export function renderDocument(
   // ガイド線などdraft由来の要素は一切含まれない)。
   draftObjects?: DrawingObject[] | null,
   imageSelection?: ImageSelection | null,
+  // pruneLayerCache/pruneImageCache key eviction on *this call's* document
+  // alone — correct for the live editor canvas (CanvasStage), whose calls
+  // always reflect the single document actually on screen, but wrong for a
+  // one-off render of some *other* document (documentStorage.ts's
+  // createThumbnail(), exportPng.ts): if that other document doesn't
+  // reference a src the live editor is still mid-decode on (e.g. a
+  // thumbnail regenerated for a different saved session while today's photo
+  // import is still decoding), pruning here would evict that src's decode
+  // cache entry — and the pending redraw callback registered for it — out
+  // from under the live editor, which then never repaints on its own.
+  // Callers rendering a document that isn't necessarily "the" live one pass
+  // `{ prune: false }` to opt out; the live editor's own calls (both here in
+  // CanvasStage's render effect) keep the default so normal eviction still
+  // happens on every real document mutation.
+  options?: { prune?: boolean },
 ) {
-  pruneLayerCache(document);
-  pruneImageCache(document);
+  if (options?.prune !== false) {
+    pruneLayerCache(document);
+    pruneImageCache(document);
+  }
   target.clearRect(0, 0, document.width, document.height);
   drawTemplate(target, document.template, document.width, document.height);
 
@@ -530,7 +547,13 @@ export function renderDocument(
     for (const object of layer.objects) {
       if (object.type !== 'image') continue;
       const box: ImageBox = imageSelection && imageSelection.id === object.id ? imageSelection : object;
-      drawImageObject(target, object, box, () => renderDocument(target, document, draftObjects, imageSelection));
+      // Forward `options` (in particular `prune`) to the follow-up redraw
+      // this schedules once a cold src finishes decoding — otherwise a
+      // { prune: false } caller (createThumbnail/exportPng) would still
+      // prune with the default (true) once its callback eventually fires,
+      // reintroducing the exact eviction race this option exists to avoid,
+      // just deferred until decode completes instead of immediately.
+      drawImageObject(target, object, box, () => renderDocument(target, document, draftObjects, imageSelection, options));
     }
 
     const surface = renderedLayerSurface(layer, document.width, document.height);

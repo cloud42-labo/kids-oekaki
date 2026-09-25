@@ -101,7 +101,10 @@ export async function exportPng(document: DrawingDocument) {
   canvas.height = document.height;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
-  renderDocument(ctx, document);
+  // { prune: false }: same reasoning as documentStorage.ts's createThumbnail
+  // — this one-off export canvas isn't the live editor, so it must not evict
+  // renderer.ts's shared decode cache against just this document.
+  renderDocument(ctx, document, null, null, { prune: false });
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((result) => result ? resolve(result) : reject(new Error('PNG export failed')), 'image/png');

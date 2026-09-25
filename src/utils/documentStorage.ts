@@ -70,7 +70,13 @@ function createThumbnail(history: DrawingHistory): string | undefined {
   source.height = drawing.height;
   const sourceCtx = source.getContext('2d');
   if (!sourceCtx) return undefined;
-  renderDocument(sourceCtx, drawing);
+  // { prune: false }: this renders `drawing` (one saved session's document),
+  // which is not necessarily the document currently live in the editor (see
+  // listDrawingSessions()'s thumbnail-backfill loop, which can run this for
+  // *other* sessions). Pruning renderer.ts's shared decode cache against
+  // this document alone could evict a src the live editor is still
+  // mid-decode on. See renderDocument's own comment on `options.prune`.
+  renderDocument(sourceCtx, drawing, null, null, { prune: false });
 
   const preview = document.createElement('canvas');
   preview.width = width;
