@@ -54,19 +54,23 @@ async function saveOnNative(blob: Blob, filename: string) {
   const albumIdentifier = await ensureAlbum();
   const fileNameWithoutExtension = filename.replace(/\.png$/, '');
 
+  // savePhoto()のnative実装（Android）はpathを読み取り可能なファイルURIとして
+  // 扱い、Web dataURLをデコードしない。先にFilesystemで実ファイル化してから
+  // その native URIを渡す。
+  await Filesystem.writeFile({
+    path: filename,
+    data: base64,
+    directory: Directory.Cache,
+  });
+  const { uri } = await Filesystem.getUri({ path: filename, directory: Directory.Cache });
+
   await Media.savePhoto({
-    path: `data:image/png;base64,${base64}`,
+    path: uri,
     albumIdentifier,
     fileName: fileNameWithoutExtension,
   });
 
   try {
-    await Filesystem.writeFile({
-      path: filename,
-      data: base64,
-      directory: Directory.Cache,
-    });
-    const { uri } = await Filesystem.getUri({ path: filename, directory: Directory.Cache });
     await Share.share({
       title: 'おえかきを保存しました',
       url: uri,
