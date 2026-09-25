@@ -135,6 +135,36 @@ test.describe('safe-area-inset対応（システムバー回避）', () => {
     if (panelBox) {
       expect(viewport.width - (panelBox.x + panelBox.width)).toBeGreaterThanOrEqual(36);
     }
+
+    // ツールバー自体の外形箱だけでなく、中の個々の操作ボタン（先頭・末尾）も
+    // inset-left/rightの内側にあることを直接確認する。.creative-toolbarは
+    // flex-wrap:nowrapで子がflex-shrinkしないため、外形箱がinsetの内側に
+    // 収まっていても、収まりきらない末尾のボタン（保存/PNG）がinsetの外や
+    // ビューポート外へはみ出し、システムUIの裏に隠れて操作不能になり得る
+    // （Codexレビュー指摘 discussion_r4104352680）。外形箱の確認だけでは
+    // この失敗モードを検知できないため、先頭・末尾ボタン自身の位置を見る。
+    const toolbarButtons = toolbar.getByRole('button');
+    const firstButton = toolbarButtons.first();
+    const lastButton = toolbarButtons.last();
+    const firstButtonBox = await firstButton.boundingBox();
+    const lastButtonBox = await lastButton.boundingBox();
+    expect(firstButtonBox).not.toBeNull();
+    expect(lastButtonBox).not.toBeNull();
+    if (firstButtonBox) {
+      expect(firstButtonBox.x).toBeGreaterThanOrEqual(24);
+    }
+    if (lastButtonBox) {
+      // 末尾ボタン（保存/PNG書き出し）の右端がinset-rightの内側、かつ
+      // ビューポート自体の内側にあること。
+      expect(viewport.width - (lastButtonBox.x + lastButtonBox.width)).toBeGreaterThanOrEqual(36);
+      expect(lastButtonBox.x + lastButtonBox.width).toBeLessThanOrEqual(viewport.width);
+    }
+    // 末尾ボタン（保存/PNG書き出し）はクリック可能（他要素に覆われていない）で
+    // あること。この幅ではラベルspanがdisplay:noneになりアクセシブルネームから
+    // 外れる既存仕様（Codexレビュー指摘・OEK-04-UX #109）のため、名前ではなく
+    // 位置で特定したlastButtonをそのまま使う。
+    await expect(lastButton).toBeVisible();
+    await expect(lastButton).toBeEnabled();
   });
 
   test('横持ち・insetが無い（0px）通常のWeb表示では、従来どおりビューポート端に接したまま', async ({ page }) => {

@@ -347,6 +347,38 @@
   .compact-tool-label { font-size: 7.5px; }
 }
 
+/* 横持ちでsafe-area-inset-left/rightが乗ると、ビューポート幅自体は700pxより
+   広くても.app-shellのpadding控除後の実効幅は700px未満まで縮む場合がある
+   （例: 780pxビューポート+inset-left24px+inset-right36pxで実効幅720px）。
+   @mediaはビューポート幅しか見られずpadding控除後の実効幅を判定できないため、
+   上のmax-width:700pxのcompact化がinset分だけ手前で必要になっていても発火
+   しない。.creative-toolbarはflex-wrap:nowrapかつ子要素がflex-shrinkしない
+   （タップ target サイズを一定以上に保つ既存方針、OEK-04-UX #109）ため、
+   実効幅が足りないとPNG/保存ボタンなど末尾の操作がinsetの外・ビューポート外へ
+   はみ出し、システムUIの裏に隠れて操作不能になる（Codexレビュー指摘
+   discussion_r4104352680）。
+
+   計測の結果、実はinsetが無い（container幅=viewport幅）状態でも横持ち
+   701〜778px付近では同じ理由で保存/PNGボタンが既にビューポート外へ
+   はみ出しており、この閾値は「insetで削られた分」だけでなく元からあった
+   隙間（上の@mediaの700pxという閾値と実際に必要な幅・約779pxとの差）も
+   カバーする必要がある。そのためcontainer query側の閾値は790px
+   （実測クロスオーバー778.875pxに約11pxのマージン）とし、上の@mediaの
+   700pxとは意図的に揃えない。790pxは実際に必要な幅に対する安全マージン
+   であり、790px超のcontainer幅（=insetが無ければ790px超のビューポート）
+   では従来どおり非compact表示のまま変化しない。 */
+@container (max-width: 790px) {
+  .creative-toolbar { min-height: 62px; height: 62px; padding: 5px 6px; gap: 4px; }
+  .primary-tools, .creative-actions { gap: 2px; }
+  .compact-tool { min-width: 40px; width: 40px; height: 44px; }
+  .compact-tool-icon { font-size: 18px; }
+  .compact-size-control { width: 92px; flex-basis: 92px; padding: 0 2px; }
+  .compact-size-control span { font-size: 10px; }
+  .icon-action { width: 40px; height: 42px; }
+  .text-action { height: 42px; width: 42px; padding: 0; }
+  .text-action span { display: none; }
+}
+
 /* 保存/PNGのラベル復活は、実測(Playwright)でツールバー全体が収まると
    確認できた600px以上に限る。480〜599pxでは保存/PNGボタンの幅まで広げると
    ツールバー右端(PNGボタン)がビューポート外へクリップされ、

@@ -50,6 +50,12 @@ button { -webkit-tap-highlight-color: transparent; }
   background: #dce6ea;
   padding-top: env(safe-area-inset-top, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* 横持ちでsafe-area-inset-left/rightぶんのpaddingを引いた後の実効幅を
+     .creative-toolbarのcontainer queryから参照できるようにする
+     （Codexレビュー指摘 discussion_r4104352680 対応。詳細はcreative-ui.cssの
+     @container側コメント参照）。containmentはwidth:100%で明示済みのため
+     自身の外側レイアウトへの影響はない。 */
+  container-type: inline-size;
 }
 .toolbar { min-height: 92px; padding: 8px 10px; display: flex; align-items: center; gap: 10px; overflow-x: auto; background: #fff; box-shadow: 0 3px 14px rgba(38,32,45,.14); z-index: 5; }
 .tool-section { display: flex; align-items: center; gap: 7px; padding-right: 10px; border-right: 2px dashed #eadce6; flex: 0 0 auto; }
