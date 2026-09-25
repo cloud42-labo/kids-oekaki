@@ -95,4 +95,60 @@ test.describe('safe-area-inset対応（システムバー回避）', () => {
     await expect(page.getByRole('button', { name: /やり直す/ })).toBeVisible();
     expect(await toolbar.getByRole('button').count()).toBeGreaterThanOrEqual(5);
   });
+
+  // Codexレビュー指摘（AGENTS.md L19: 実機での回転チェックが必須）: 横向き回転時、
+  // ナビゲーションバー/ディスプレイカットアウトがsafe-area-inset-left/rightを
+  // 発生させることがある。縦持ち専用だった対応を、横持ちでも同様に検証する。
+  test('横持ち回転: ツールバー・カラードック・レイヤーパネルがinset-left/rightの内側に収まる', async ({ page }) => {
+    await page.setViewportSize({ width: 780, height: 390 });
+    await overrideSafeAreaInsets(page, { top: 0, left: 24, bottom: 0, right: 36 });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: /まっしろ/ }).click();
+    await page.getByRole('button', { name: /よこ/ }).click();
+
+    const viewport = page.viewportSize();
+    expect(viewport).not.toBeNull();
+    if (!viewport) return;
+
+    // ツールバー全体（先頭要素）がinset-left/rightの内側にある
+    const toolbar = page.locator('.creative-toolbar');
+    const toolbarBox = await toolbar.boundingBox();
+    expect(toolbarBox).not.toBeNull();
+    if (toolbarBox) {
+      expect(toolbarBox.x).toBeGreaterThanOrEqual(24);
+      expect(viewport.width - (toolbarBox.x + toolbarBox.width)).toBeGreaterThanOrEqual(36);
+    }
+
+    // ワークスペース左端のカラードックがinset-leftの内側にある
+    const colorDock = page.locator('.color-dock');
+    const dockBox = await colorDock.boundingBox();
+    expect(dockBox).not.toBeNull();
+    if (dockBox) {
+      expect(dockBox.x).toBeGreaterThanOrEqual(24);
+    }
+
+    // ワークスペース右端のレイヤーパネルがinset-rightの内側にある
+    const layerPanel = page.locator('.layer-panel');
+    const panelBox = await layerPanel.boundingBox();
+    expect(panelBox).not.toBeNull();
+    if (panelBox) {
+      expect(viewport.width - (panelBox.x + panelBox.width)).toBeGreaterThanOrEqual(36);
+    }
+  });
+
+  test('横持ち・insetが無い（0px）通常のWeb表示では、従来どおりビューポート端に接したまま', async ({ page }) => {
+    await page.setViewportSize({ width: 780, height: 390 });
+    await overrideSafeAreaInsets(page, { top: 0, left: 0, bottom: 0, right: 0 });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: /まっしろ/ }).click();
+    await page.getByRole('button', { name: /よこ/ }).click();
+
+    const colorDock = page.locator('.color-dock');
+    const dockBox = await colorDock.boundingBox();
+    expect(dockBox).not.toBeNull();
+    // env()のフォールバックが0pxのため、従来どおりビューポート左端(0px前後)のまま
+    if (dockBox) expect(dockBox.x).toBeLessThanOrEqual(2);
+  });
 });
