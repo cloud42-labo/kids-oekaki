@@ -722,4 +722,137 @@ test.describe('draft layer image import', () => {
     // and the editor stays blank.
     await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(true);
   });
+
+  // Codex review findings on the merge-conflict-resolution commit (reviewed
+  // commit d63fdd2883, current head): App.tsx's importImage() racing a
+  // document switch, Toolbar.tsx's photo button having no way back into
+  // image mode, and documentStorage.ts's createThumbnail() racing decode
+  // the same way exportPng.ts already guards against.
+
+  test('⑮ 取り込み中に別の作品へ切り替えても、古い取り込みは新しい作品に反映されない', async ({ page }) => {
+    // Regression test for the P2 finding: importImage() decodes
+    // asynchronously and then always calls the stable importDraftImage
+    // action, which applies to whatever document is current *when it
+    // resolves* — not the document that was active when the picker was
+    // used. Widening the decode window (as tests ⑦/⑪/⑭ already do for the
+    // same underlying race, just at a different call site) makes it
+    // possible to reliably leave the original document before decoding
+    // finishes.
+    await installDelayedImageDecoding(page, 300);
+
+    await startBlankDrawing(page);
+    await page.locator('input[type="file"]').setInputFiles(FIXTURE_PATH);
+
+    // Leave this document well before the ~300ms delayed decode resolves:
+    // save-and-return, then start a brand new (differently-identified)
+    // blank drawing. returnToStart() saves session A on the way out, so the
+    // start screen now also lists it as a saved-work card — scope to
+    // .template-card specifically (not just role+name "まっしろ") so this
+    // doesn't collide with that card's own "まっしろ ..." text.
+    await page.getByRole('button', { name: '開始画面へ戻る' }).click();
+    await page.locator('.template-card', { hasText: 'まっしろ' }).click();
+    await page.getByRole('button', { name: /たて/ }).click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // Give the delayed decode time to resolve. Against the pre-fix code,
+    // the photo would appear here — inserted into (and about to be
+    // autosaved into) this unrelated new document.
+    await page.waitForTimeout(600);
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+
+    // Also confirm the layer panel of this new document never gained the
+    // photo either (belt-and-suspenders on the same assertion).
+    const draftRow = page.locator('.layer-row', { hasText: 'したがき' });
+    await expect(draftRow).not.toHaveClass(/active/);
+  });
+
+  test('⑯ ブラシへ切り替えたあとも、しゃしんボタンで取り込み済みの画像をもう一度うごかせる', async ({ page }) => {
+    // Regression test for the P2 finding: after import, settings.mode is
+    // 'image'; choosing any other tool moves it away, and the photo button
+    // used to unconditionally reopen the file picker, so an existing photo
+    // could no longer be reselected/moved/resized without importing an
+    // additional one. Now, once a photo already exists, the same button
+    // re-enters image mode instead (its aria-label/title change to say so).
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+
+    await page.getByRole('button', { name: 'ペン' }).click();
+    await expect(page.getByRole('button', { name: 'したがきのしゃしんをうごかす' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'したがきのしゃしんをうごかす' }).click();
+
+    // Drag exactly like test ② — proves the button re-selected image mode
+    // (and the still-selected photo) rather than opening the file picker.
+    await dragImage(page, { x: DOC_WIDTH / 2, y: DOC_HEIGHT / 2 }, { x: DOC_WIDTH / 2 + 120, y: DOC_HEIGHT / 2 - 120 });
+
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, 260, 425))).toBe(false);
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2 + 100, DOC_HEIGHT / 2 - 100))).toBe(true);
+  });
+
+  test('⑰ デコード中に保存しても、保存されるサムネイルに画像が反映される', async ({ page }) => {
+    // Regression test for the P2 finding: documentStorage.ts's
+    // createThumbnail() used to render synchronously, so a still-decoding
+    // draft-layer photo was silently missing from the persisted thumbnail
+    // forever — the later "ready" redraw only ever reached the offscreen
+    // canvas createThumbnail() had already serialized and discarded (test
+    // ⑭ covers the *live editor canvas* recovering via the same underlying
+    // per-target redraw fix; this covers the separately-broken *persisted
+    // thumbnail data* on that same save).
+    await installDelayedImageDecoding(page, 300);
+
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    await page.reload();
+    await page.locator('.saved-work-open').first().click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // Save again immediately, well inside the ~300ms delayed decode, so
+    // saveDrawingSession's thumbnail generation races the still-decoding
+    // image exactly like test ⑭'s editor-canvas race, but on the thumbnail
+    // path instead.
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+    await page.waitForTimeout(600);
+
+    const thumbnail = await page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
+      const request = indexedDB.open('kids-oekaki', 1);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction('drawing-sessions', 'readonly');
+        const getAllReq = tx.objectStore('drawing-sessions').getAll();
+        getAllReq.onsuccess = () => {
+          const rows = getAllReq.result as Array<{ thumbnail?: string }>;
+          db.close();
+          resolve(rows.find((row) => row.thumbnail)?.thumbnail);
+        };
+        getAllReq.onerror = () => reject(getAllReq.error ?? new Error('failed to read thumbnail'));
+      };
+      request.onerror = () => reject(request.error ?? new Error('failed to open db'));
+    }));
+    expect(thumbnail).toBeTruthy();
+
+    // Decode the persisted thumbnail itself (not the live canvas) and
+    // sample its center pixel. Against the pre-fix code this is white/blank
+    // there — the photo never made it into the serialized thumbnail even
+    // though (post the earlier per-target fix) the live editor recovered.
+    const [r, g, b] = await page.evaluate((dataUrl) => new Promise<number[]>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(Math.round(img.naturalWidth / 2), Math.round(img.naturalHeight / 2), 1, 1).data;
+        resolve([data[0], data[1], data[2]]);
+      };
+      img.onerror = () => reject(new Error('failed to decode thumbnail'));
+      img.src = dataUrl;
+    }), thumbnail!);
+
+    expect(isCloseToRed({ r, g, b })).toBe(true);
+  });
 });

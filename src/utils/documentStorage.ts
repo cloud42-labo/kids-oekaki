@@ -1,5 +1,5 @@
 import type { ToolSettings } from '../domain/drawing';
-import { renderDocument } from '../engine/renderer';
+import { preloadDocumentImages, renderDocument } from '../engine/renderer';
 import type { DrawingHistory } from '../state/useDrawingDocument';
 
 const DB_NAME = 'kids-oekaki';
@@ -79,6 +79,28 @@ function createThumbnail(history: DrawingHistory): string | undefined {
   if (!previewCtx) return undefined;
   previewCtx.drawImage(source, 0, 0, width, height);
   return preview.toDataURL('image/webp', 0.72);
+}
+
+// createThumbnail() renders synchronously: if a draft-layer photo hasn't
+// finished decoding yet, renderer.ts's drawImageObject skips it for *this*
+// call and only schedules a redraw once decoding completes — but that
+// redraw targets the canvas createThumbnail() already discarded after
+// calling toDataURL() on it, so the photo would be silently missing from
+// the persisted thumbnail forever (the live editor canvas is unaffected;
+// it has its own redraw target — see engine/renderer.ts's per-target
+// pendingRedraws). Awaiting preloadDocumentImages() first — the same guard
+// utils/exportPng.ts already uses before its own renderDocument() call —
+// guarantees every image is decoded before createThumbnail() rasterizes.
+// Kept as a separate wrapper (rather than making createThumbnail itself
+// async) because migrateLegacyCurrent() below calls the sync version from
+// inside a live IndexedDB transaction, where awaiting anything before the
+// next store request would let the transaction auto-close; that call site
+// is safe to leave synchronous since schemaVersion-2-without-kind legacy
+// documents predate the image-import feature and can never contain an
+// image object.
+async function createThumbnailAsync(history: DrawingHistory): Promise<string | undefined> {
+  await preloadDocumentImages(history.present);
+  return createThumbnail(history);
 }
 
 async function readValue<T>(db: IDBDatabase, key: IDBValidKey): Promise<T | undefined> {
@@ -169,7 +191,7 @@ export async function saveDrawingSession(
       savedAt,
       history,
       settings,
-      thumbnail: createThumbnail(history),
+      thumbnail: await createThumbnailAsync(history),
     };
     await putValue(db, `${DRAFT_PREFIX}${id}`, session);
     return session;
@@ -213,20 +235,22 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
       transaction.onerror = () => reject(transaction.error ?? new Error('保存した作品を読めませんでした'));
     });
 
-    return entries
-      .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
-      .map(({ value }) => {
-        validateHistory(value.history);
-        if (value.schemaVersion !== SCHEMA_VERSION) {
-          throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
-        }
-        return {
-          ...value,
-          name: normalizeName(value.name, value.history, value.savedAt),
-          thumbnail: value.thumbnail ?? createThumbnail(value.history),
-        };
-      })
-      .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+    const sessions = await Promise.all(
+      entries
+        .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
+        .map(async ({ value }) => {
+          validateHistory(value.history);
+          if (value.schemaVersion !== SCHEMA_VERSION) {
+            throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
+          }
+          return {
+            ...value,
+            name: normalizeName(value.name, value.history, value.savedAt),
+            thumbnail: value.thumbnail ?? await createThumbnailAsync(value.history),
+          };
+        }),
+    );
+    return sessions.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
   } finally {
     db.close();
   }
@@ -244,7 +268,7 @@ export async function loadDrawingSession(id: string): Promise<StoredDrawingSessi
     return {
       ...value,
       name: normalizeName(value.name, value.history, value.savedAt),
-      thumbnail: value.thumbnail ?? createThumbnail(value.history),
+      thumbnail: value.thumbnail ?? await createThumbnailAsync(value.history),
     };
   } finally {
     db.close();

@@ -48,6 +48,17 @@ export default function App() {
   const [settings, setSettings] = useState<ToolSettings>(DEFAULT_SETTINGS);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [imageImportError, setImageImportError] = useState<string>();
+  // importImage() below decodes a picked photo asynchronously; if the user
+  // returns to the start screen and opens/starts a different document before
+  // that finishes, the stale result must not land in whatever document
+  // happens to be active when it resolves. A ref (not the `activeSessionId`
+  // captured in importImage's own closure) is required here because we need
+  // the *latest* value at resolution time, not the value from when the
+  // import began.
+  const activeSessionIdRef = useRef(activeSessionId);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
   // ミラー描画モードはdocument/settingsの一部ではなく、その場のUI操作の
   // 状態としてのみ扱う(保存データのschemaには影響しない)。新規作成・
   // 続きから、どちらでも既定はOFFに戻す。
@@ -131,9 +142,18 @@ export default function App() {
   };
 
   const importImage = async (file: File) => {
+    // Snapshot which document this import is for. Decoding is async (file
+    // read + downscale), so the user can return to the start screen and
+    // open/start a different document while it's in flight; importDraftImage
+    // always applies to whatever document is current *when it's called*, so
+    // without this check a slow decode could silently insert (and then
+    // autosave) one session's chosen photo into an unrelated session.
+    const sessionAtImport = activeSessionId;
+    const isStale = () => activeSessionIdRef.current !== sessionAtImport;
     try {
       setImageImportError(undefined);
       const decoded = await loadDraftImageFile(file);
+      if (isStale()) return;
       const maxWidth = drawing.document.width * 0.8;
       const maxHeight = drawing.document.height * 0.8;
       const scale = Math.min(maxWidth / decoded.naturalWidth, maxHeight / decoded.naturalHeight, 1);
@@ -152,6 +172,7 @@ export default function App() {
       setSelectedImageId(image.id);
       setSettings((current) => ({ ...current, mode: 'image' }));
     } catch (error) {
+      if (isStale()) return;
       setImageImportError(error instanceof Error ? error.message : '画像をとりこめませんでした。');
     }
   };
@@ -159,6 +180,12 @@ export default function App() {
   const updateImage = (id: string, box: ImageBox) => {
     drawing.updateImageObject(id, box);
   };
+
+  // Whether the current document already has an imported photo anywhere —
+  // drives Toolbar's photo button: once one exists, the button re-enters
+  // image-edit mode to reselect/move/resize it instead of always reopening
+  // the file picker (see Toolbar's onImportImage/hasDraftImage handling).
+  const hasDraftImage = drawing.document.layers.some((layer) => layer.objects.some((object) => object.type === 'image'));
 
   const returnToStart = async () => {
     if (!activeSessionId) {
@@ -246,6 +273,7 @@ export default function App() {
         onSaveDraft={() => void saveCurrent(true)}
         onExportPng={() => void exportPng(drawing.document)}
         onImportImage={(file) => void importImage(file)}
+        hasDraftImage={hasDraftImage}
         saveState={saveState}
       />
       {storageError && <div className="save-error-banner" role="alert">⚠️ {storageError}</div>}
