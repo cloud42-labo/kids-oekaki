@@ -48,6 +48,10 @@ export default function App() {
   const [settings, setSettings] = useState<ToolSettings>(DEFAULT_SETTINGS);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [imageImportError, setImageImportError] = useState<string>();
+  // ミラー描画モードはdocument/settingsの一部ではなく、その場のUI操作の
+  // 状態としてのみ扱う(保存データのschemaには影響しない)。新規作成・
+  // 続きから、どちらでも既定はOFFに戻す。
+  const [mirrorEnabled, setMirrorEnabled] = useState(false);
   const drawing = useDrawingDocument();
 
   useEffect(() => {
@@ -105,6 +109,7 @@ export default function App() {
     drawing.reset(template, orientation);
     setSettings(DEFAULT_SETTINGS);
     setSelectedImageId(null);
+    setMirrorEnabled(false);
     setActiveSessionId(crypto.randomUUID());
     setSaveState('idle');
     setStarted(true);
@@ -116,6 +121,7 @@ export default function App() {
     drawing.restoreHistory(session.history);
     setSettings(session.settings ?? DEFAULT_SETTINGS);
     setSelectedImageId(null);
+    setMirrorEnabled(false);
     setActiveSessionId(session.id);
     setSaveState('saved');
     setStarted(true);
@@ -230,6 +236,8 @@ export default function App() {
       <Toolbar
         settings={settings}
         setSettings={setSettings}
+        mirrorEnabled={mirrorEnabled}
+        onToggleMirror={() => setMirrorEnabled((current) => !current)}
         canUndo={drawing.canUndo}
         canRedo={drawing.canRedo}
         onUndo={drawing.undo}
@@ -253,9 +261,11 @@ export default function App() {
         <CanvasStage
           document={drawing.document}
           settings={settings}
+          mirrorEnabled={mirrorEnabled}
           onCommitStroke={drawing.commitStroke}
           onCommitBlur={drawing.commitBlur}
           onCommitStamp={drawing.commitStamp}
+          onCommitMirroredStroke={drawing.commitMirroredStroke}
           selectedImageId={selectedImageId}
           onSelectImage={setSelectedImageId}
           onUpdateImage={updateImage}

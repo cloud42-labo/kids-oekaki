@@ -47,20 +47,34 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
     setHistory((h) => ({ ...h, present: { ...h.present, activeLayerId: layerId } }));
   }, []);
 
-  const appendToActiveLayer = useCallback((object: StrokeObject | BlurObject | StampObject) => {
+  // 複数のobjectを1回のhistory push(=1 Undo/Redo単位)でまとめて追加する。
+  // ミラー描画で生成される「元のstroke」と「反転したstroke」のペアは、
+  // これを使って1回のUndo/Redoで同時に消える/戻るようにする。
+  const appendObjectsToActiveLayer = useCallback((objects: Array<StrokeObject | BlurObject | StampObject>) => {
+    if (objects.length === 0) return;
     setHistory((h) => {
       const active = h.present.layers.find((layer) => layer.id === h.present.activeLayerId);
       if (!active || active.locked || !active.visible) return h;
       const layers = h.present.layers.map((layer) =>
-        layer.id === h.present.activeLayerId ? { ...layer, objects: [...layer.objects, object] } : layer,
+        layer.id === h.present.activeLayerId ? { ...layer, objects: [...layer.objects, ...objects] } : layer,
       );
       return push(h, { ...h.present, layers });
     });
   }, []);
 
+  const appendToActiveLayer = useCallback(
+    (object: StrokeObject | BlurObject | StampObject) => appendObjectsToActiveLayer([object]),
+    [appendObjectsToActiveLayer],
+  );
+
   const commitStroke = useCallback((stroke: StrokeObject) => appendToActiveLayer(stroke), [appendToActiveLayer]);
   const commitBlur = useCallback((blur: BlurObject) => appendToActiveLayer(blur), [appendToActiveLayer]);
   const commitStamp = useCallback((stamp: StampObject) => appendToActiveLayer(stamp), [appendToActiveLayer]);
+  // ミラー描画モード用: strokeとその反転strokeを1 Undo/Redo単位でコミットする。
+  const commitMirroredStroke = useCallback(
+    (stroke: StrokeObject, mirroredStroke: StrokeObject) => appendObjectsToActiveLayer([stroke, mirroredStroke]),
+    [appendObjectsToActiveLayer],
+  );
 
   // Imported photos always land in the layer marked kind:'draft' (the
   // したがき/"draft" layer created by createInitialDocument), regardless of
@@ -211,6 +225,7 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
     commitStroke,
     commitBlur,
     commitStamp,
+    commitMirroredStroke,
     importDraftImage,
     updateImageObject,
     addLayer,

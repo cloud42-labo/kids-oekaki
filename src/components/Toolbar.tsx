@@ -25,6 +25,8 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type Props = {
   settings: ToolSettings;
   setSettings: (next: ToolSettings) => void;
+  mirrorEnabled: boolean;
+  onToggleMirror: () => void;
   canUndo: boolean;
   canRedo: boolean;
   onUndo: () => void;
@@ -36,7 +38,21 @@ type Props = {
   saveState: SaveState;
 };
 
-export function Toolbar({ settings, setSettings, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, onImportImage, saveState }: Props) {
+export function Toolbar({
+  settings,
+  setSettings,
+  mirrorEnabled,
+  onToggleMirror,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  onReturnToStart,
+  onSaveDraft,
+  onExportPng,
+  onImportImage,
+  saveState,
+}: Props) {
   const toolbarRef = useRef<HTMLElement>(null);
   const stampMenuRef = useRef<HTMLDetailsElement>(null);
   const stampPopoverRef = useRef<HTMLDivElement>(null);
@@ -137,6 +153,16 @@ export function Toolbar({ settings, setSettings, canUndo, canRedo, onUndo, onRed
           aria-hidden="true"
           tabIndex={-1}
         />
+        <button
+          type="button"
+          className={mirrorEnabled ? 'compact-tool active' : 'compact-tool'}
+          onClick={onToggleMirror}
+          aria-pressed={mirrorEnabled}
+          title="ミラーがき"
+        >
+          <span className="compact-tool-icon" aria-hidden="true">⇋</span>
+          <span className="compact-tool-label">ミラー</span>
+        </button>
       </div>
 
       <label className="compact-size-control">
