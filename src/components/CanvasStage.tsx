@@ -42,7 +42,17 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // 再現した）。ペン入力のレイテンシ低減は、この直後にあるrequestAnimationFrame
 // によるフレームバッチ処理（queueLiveSegments/flushLiveSegments）が既に主要な
 // 改善を担っているため、`desynchronized`は使わず標準の同期canvasへ戻す。
-const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d') ?? null;
+//
+// OEK-05-S03-BUG03: `alpha: false` はdesynchronizedと異なりtearing等の副作用が
+// 知られていない保守的な最適化で、ブラウザ/WebViewにこのcanvasがアルファ
+// チャンネルを持たないと伝え、毎フレームのアルファブレンド合成コストを省く。
+// renderDocument()は常にdrawTemplate()で不透明な背景（#fff等）を全面へ
+// fillRectしてから描画するため、このcanvas（メイン表示用）は常に不透明であり
+// 安全に指定できる（レイヤーごとのオフスクリーンサーフェスは消しゴムの
+// destination-out等でアルファが必須のため対象外、renderer.ts側は変更していない）。
+// 低スペックAndroid GPUでのコンポジットコストは、ペン入力のもたつき
+// （OEK-05-S03-BUG03）の一因になり得るため、低リスクな改善として適用する。
+const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d', { alpha: false }) ?? null;
 
 export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, onCommitStamp }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -207,11 +217,33 @@ export function CanvasStage({ document, settings, onCommitStroke, onCommitBlur, 
     setViewport({ scale: nextScale, x, y });
   };
 
+  // OEK-05-S03-BUG03: 高速パス（RAFバッチ処理によるインクリメンタル描画）は
+  // 'pen'ブラシに限定する。一度'eraser'にも拡張したが、この高速パスは
+  // get2dContext()経由でメイン表示用canvas（{alpha:false}、レイヤー合成を
+  // 経由しない1枚のflattenedな不透明canvas）へ直接destination-outを描く。
+  // alpha:falseのcanvasはアルファチャンネルを保持できないため、消しゴムで
+  // 作られるはずの透明部分を表現できず、ストローク中（pointer-up前）だけ
+  // 黒などの不正な色で表示される回帰を生んだ（Codexレビュー指摘P1、
+  // e2e/pen-eraser-live-path.spec.tsはpointer-up後のみ検証していたため
+  // 検知できなかった）。低速パス（setDraft経由のrenderDocument）は
+  // renderer.tsのgetDraftSurface（alpha:trueのオフスクリーンcanvas）上で
+  // destination-outしてからdrawImageでtargetへ合成するため、ストローク中も
+  // 正しくレイヤー下を透過して見せられる。'eraser'を高速パスへ再度含める
+  // 場合は、この合成経路（アルファ対応のオーバーレイ/レイヤーへライブ描画
+  // する）を高速パス側にも用意すること。
+  // 'marker'は対象に含めない: alpha=0.3の半透明ストロークをRAFバッチ単位で
+  // 分割してstroke()すると、バッチの境界やストローク自身の自己交差部分で
+  // 透明度が重なり合い、低速パス（全体を1回のstroke()で描く）とは異なる
+  // 濃淡のズレ（アーティファクト）が生じ得るため。'rainbow'/'neon'は
+  // セグメント単位で色が変わる・多重描画があるため、単純な直線分割の
+  // 高速パスにそのまま乗せられない。
   const canUseLiveStroke = (stroke: StrokeObject) =>
     activeLayerIsTopmostVisible
     && stroke.brush === 'pen'
     && Math.abs((activeLayer?.opacity ?? 1) - 1) < 0.001;
 
+  // 高速パスは'pen'限定（上のcanUseLiveStroke参照）。renderer.tsのdrawStroke()の
+  // pen設定（source-over・本来の色・不透明）と一致させる。
   const configureLiveStrokeContext = (ctx: CanvasRenderingContext2D, stroke: StrokeObject) => {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
