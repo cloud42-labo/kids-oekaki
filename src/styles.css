@@ -57,8 +57,11 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .workspace { min-height: 0; flex: 1; display: flex; }
 .canvas-area { position: relative; min-width: 0; flex: 1; display: grid; place-items: center; padding: 14px; overflow: hidden; background: linear-gradient(135deg, #c7d3d9, #e8eef1); }
-.canvas-frame { max-width: 100%; max-height: 100%; aspect-ratio: 800 / 1131; background: #fff; box-shadow: 0 12px 30px rgba(32,44,51,.25); }
+.canvas-frame { position: relative; max-width: 100%; max-height: 100%; aspect-ratio: 800 / 1131; background: #fff; box-shadow: 0 12px 30px rgba(32,44,51,.25); }
 .canvas-frame canvas { display: block; width: 100%; height: 100%; touch-action: none; background: #fff; }
+/* ミラー描画モードの中央軸ガイド。canvas要素には一切描画しない(DOM上のオーバーレイのみ)ため、
+   PNG書き出し(renderDocumentを直接呼ぶ別canvas)には絶対に含まれない。 */
+.mirror-axis-guide { position: absolute; top: 0; left: 50%; width: 0; height: 100%; border-left: 3px dashed rgba(51,45,56,.55); pointer-events: none; z-index: 2; transform: translateX(-1.5px); }
 .zoom-controls { position: absolute; top: 18px; right: 18px; display: flex; align-items: center; gap: 6px; padding: 5px; border-radius: 28px; background: rgba(51,45,56,.78); box-shadow: 0 6px 16px rgba(32,44,51,.3); z-index: 4; }
 .zoom-controls button { min-width: 48px; min-height: 48px; border: 0; color: #fff; font-weight: 900; }
 .zoom-controls button:disabled { opacity: .38; }
