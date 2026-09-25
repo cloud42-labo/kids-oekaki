@@ -61,11 +61,21 @@ function getBlurMaskSurface(width: number, height: number) {
 // reuses the same decoded element.
 const imageElements = new Map<string, HTMLImageElement>();
 
-// The redraw ("onReady") callback most recently registered for a src that's
-// still decoding — see getImageElement below. Also doubles as "a `load`
-// listener is already attached for this src" so callers never stack more
-// than one native listener per source.
-const pendingRedraws = new Map<string, () => void>();
+// The redraw ("onReady") callbacks registered for a src that's still
+// decoding — see getImageElement below. Keyed by src, then by the calling
+// CanvasRenderingContext2D ("target"): the live editor canvas and an
+// offscreen canvas such as documentStorage.ts's createThumbnail() can both
+// be waiting on the same still-decoding image at once (e.g. autosave firing
+// while a freshly restored photo is still decoding onto the editor), and
+// each needs its own redraw to fire when decoding finishes — keying by src
+// alone would let the second target's registration silently overwrite the
+// first's, leaving that target blank until some unrelated document change.
+// The outer Map having an entry for a src also doubles as "a `load`
+// listener is already attached for this src", so callers never stack more
+// than one *native* listener per source — it fans out to every registered
+// target's callback when it fires, rather than adding a native listener per
+// target.
+const pendingRedraws = new Map<string, Map<CanvasRenderingContext2D, () => void>>();
 
 function readyImageElement(src: string): HTMLImageElement | undefined {
   const img = imageElements.get(src);
@@ -143,14 +153,14 @@ export async function preloadDocumentImages(document: DrawingDocument): Promise<
 // render of it reaches this function again — moving the selection chrome
 // alone can call it many times a second — so a *native* `load` listener is
 // only ever attached once per src (guarded by pendingRedraws already having
-// an entry); each subsequent call just replaces the pending callback with
-// its own, more current one. Whichever caller asked most recently "wins"
-// and is the one invoked when decoding finishes, which is enough: firing it
-// triggers a fresh renderDocument() against current state anyway, so there
-// is nothing extra to gain from also firing the stale ones — and, unlike
-// before, decoding no longer queues up dozens of redundant full-canvas
-// redraws in a single frame once it finally completes.
-function getImageElement(src: string, onReady: () => void): HTMLImageElement | undefined {
+// an entry for it); each subsequent call from the *same* target just
+// replaces that target's own pending callback with its own, more current
+// one. Calls from a *different* target (e.g. the live editor canvas vs.
+// documentStorage.ts's createThumbnail() offscreen canvas, both waiting on
+// the same still-decoding src) register alongside it instead of overwriting
+// it, so every distinct target that asked gets its own redraw fired once
+// decoding finishes — without reintroducing a native listener per target.
+function getImageElement(target: CanvasRenderingContext2D, src: string, onReady: () => void): HTMLImageElement | undefined {
   const ready = readyImageElement(src);
   if (ready) return ready;
   let img = imageElements.get(src);
@@ -165,18 +175,19 @@ function getImageElement(src: string, onReady: () => void): HTMLImageElement | u
     img.src = src;
   }
   if (!pendingRedraws.has(src)) {
+    pendingRedraws.set(src, new Map());
     img.addEventListener('load', () => {
-      const callback = pendingRedraws.get(src);
+      const callbacks = pendingRedraws.get(src);
       pendingRedraws.delete(src);
-      callback?.();
+      callbacks?.forEach((callback) => callback());
     }, { once: true });
   }
-  pendingRedraws.set(src, onReady);
+  pendingRedraws.get(src)!.set(target, onReady);
   return undefined;
 }
 
 function drawImageObject(target: CanvasRenderingContext2D, object: ImageObject, box: ImageBox, onReady: () => void) {
-  const img = getImageElement(object.src, onReady);
+  const img = getImageElement(target, object.src, onReady);
   if (!img) return; // not decoded yet — onReady triggers a follow-up render
   target.save();
   target.imageSmoothingEnabled = true;

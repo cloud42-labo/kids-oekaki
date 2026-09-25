@@ -146,6 +146,89 @@ async function seedLegacyDrawingSession(page: Page, id: string) {
   }, id);
 }
 
+// Writes a StoredDrawingSession shaped like what's left after a user deletes
+// their したがき layer entirely (still possible any time — LayerPanel's
+// 🗑️けす only refuses to go below one remaining layer) and then saves: no
+// layer is named したがき and none carries kind: 'draft'. This is the case
+// ensureDraftLayer() (domain/drawing.ts) must NOT paper over by guessing —
+// unlike seedLegacyDrawingSession above (where したがき still exists, just
+// unmarked, so re-tagging it by name is safe), here there is no layer left
+// that can be identified as the sketch/draft layer with any confidence. The
+// bottom-most remaining layer (いろぬり here) is deliberately seeded with
+// its own pre-existing artwork (a BLUE stroke) and is NOT the active layer,
+// so a subsequent photo import must never land on it — if ensureDraftLayer
+// wrongly tagged it kind: 'draft' (the old bottom-index fallback), the photo
+// would land there instead of on the active せんが layer, and that layer's
+// opacity/visibility/clear/delete controls would then also reach the
+// pre-existing artwork.
+async function seedSketchDeletedDrawingSession(page: Page, id: string) {
+  await page.evaluate((sessionId) => {
+    const colorId = 'sketch-deleted-color';
+    const lineId = 'sketch-deleted-line';
+    const session = {
+      schemaVersion: 2,
+      id: sessionId,
+      name: 'sketch-deleted',
+      savedAt: new Date().toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: 800,
+          height: 1131,
+          orientation: 'portrait',
+          template: 'blank',
+          // せんが (empty) is active — the fix's expected import target.
+          activeLayerId: lineId,
+          layers: [
+            {
+              id: colorId,
+              name: 'いろぬり',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              // Stands in for real artwork the user drew after deleting
+              // したがき — must never be touched by the photo's controls.
+              objects: [
+                {
+                  id: 'sketch-deleted-stroke',
+                  type: 'stroke',
+                  brush: 'pen',
+                  color: '#1971c2',
+                  size: 20,
+                  points: [
+                    { x: 100, y: 80, pressure: 1 },
+                    { x: 700, y: 80, pressure: 1 },
+                  ],
+                },
+              ],
+            },
+            { id: lineId, name: 'せんが', visible: true, locked: false, opacity: 1, objects: [] },
+          ],
+          // No したがき layer anywhere, and no layer carries kind: 'draft' —
+          // the exact shape ensureDraftLayer() must leave alone.
+        },
+      },
+    };
+
+    return new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('kids-oekaki', 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction('drawing-sessions', 'readwrite');
+        tx.objectStore('drawing-sessions').put(session, `draft:${sessionId}`);
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => reject(tx.error ?? new Error('failed to seed sketch-deleted session'));
+      };
+      request.onerror = () => reject(request.error ?? new Error('failed to open db'));
+    });
+  }, id);
+}
+
 // Delays every `HTMLImageElement.src` assignment on the page by `delayMs`
 // before it actually reaches the native setter (so `.complete` stays false
 // and no decode/load starts until then), without changing any other Image
@@ -535,5 +618,108 @@ test.describe('draft layer image import', () => {
     // entry breaks decoding a new one.
     await importPanoramaPhoto(page);
     await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, 565))).toBe(true);
+  });
+
+  // Codex review findings on the second follow-up commit (reviewed commit
+  // 9c26f7fc8d), fixed in a third follow-up commit: domain/drawing.ts's
+  // ensureDraftLayer() no longer guesses a draft layer when したがき is
+  // missing entirely, and engine/renderer.ts's pendingRedraws is now keyed
+  // per (src, target) instead of per src alone.
+
+  test('⑬ したがきレイヤーが削除された保存データを再開して画像を取り込むと、アクティブレイヤーへ入り既存の作品には影響しない', async ({ page }) => {
+    // Regression test for the P2 finding: when NO layer is named したがき
+    // (e.g. the user deleted it), ensureDraftLayer() used to fall back to
+    // tagging the bottom-most remaining layer (array index 0) as kind:
+    // 'draft' — but that layer can be genuine artwork the user drew, not a
+    // sketch layer. Here いろぬり (bottom, holds a pre-existing BLUE stroke,
+    // NOT active) stands in for that artwork, and せんが (empty, active) is
+    // where a photo import should land instead. The fix leaves no draft
+    // marker in this situation, so importDraftImage's own pre-existing
+    // active-layer fallback handles it.
+    await page.goto('/');
+    await seedSketchDeletedDrawingSession(page, 'sketch-deleted-session-1');
+    await page.reload();
+
+    await page.locator('.saved-work-open').first().click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // せんが (active at save time) is still active on resume, and the
+    // seeded artwork on いろぬり survived untouched.
+    await expect(page.locator('.layer-row', { hasText: 'せんが' })).toHaveClass(/active/);
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(true);
+
+    await importSamplePhoto(page);
+
+    // Landed on せんが — the active layer — not silently annexed onto
+    // いろぬり, which is exactly where the pre-fix bottom-index fallback
+    // would have put it.
+    await expect(page.locator('.layer-row', { hasText: 'せんが' })).toHaveClass(/active/);
+
+    // Hiding いろぬり (the artwork layer, NOT where the photo landed) must
+    // NOT hide the photo — before the fix, a wrongly-tagged いろぬり would
+    // have received the photo instead, so hiding it would have hidden the
+    // photo too.
+    const artLayerRow = page.locator('.layer-row', { hasText: 'いろぬり' });
+    await artLayerRow.getByRole('button', { name: 'かくす' }).click();
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(false); // artwork hidden
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(true); // photo unaffected
+    await artLayerRow.getByRole('button', { name: 'みせる' }).click();
+
+    // Hiding せんが (where the photo actually landed) DOES hide the photo,
+    // and leaves いろぬり's artwork untouched — confirming the photo and the
+    // pre-existing artwork are on genuinely separate layers, not sharing one
+    // that got mistakenly marked kind: 'draft'.
+    const lineRow = page.locator('.layer-row', { hasText: 'せんが' });
+    await lineRow.getByRole('button', { name: 'かくす' }).click();
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(true);
+    await lineRow.getByRole('button', { name: 'みせる' }).click();
+
+    // "ぜんぶけす" on せんが (the photo's actual layer) clears the photo
+    // without touching いろぬり's artwork — the delete/clear side of the
+    // same concern.
+    await page.getByRole('button', { name: '🧹 ぜんぶけす' }).click();
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, 400, 80), BLUE)).toBe(true);
+  });
+
+  test('⑭ 保存時のサムネイル生成と本編キャンバスが同じデコード中の画像を待っていても、両方とも表示される', async ({ page }) => {
+    // Regression test for the P2 finding: pendingRedraws used to be keyed
+    // only by image src, so two different render targets waiting on the
+    // same still-decoding image would step on each other — whichever target
+    // called getImageElement last "won" the single global callback slot, and
+    // the other's redraw was silently dropped forever (until some unrelated
+    // document change forced another render). documentStorage.ts's
+    // createThumbnail() renders the same restored image into its own
+    // offscreen canvas on every 保存/autosave, so resuming with a
+    // still-decoding image (which makes the live editor canvas register a
+    // pending redraw first) and then immediately saving (which makes
+    // createThumbnail's offscreen canvas register a second, different
+    // target's pending redraw on the very same src) reproduces the ordering
+    // deterministically.
+    await installDelayedImageDecoding(page, 300);
+
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    await page.reload();
+    await page.locator('.saved-work-open').first().click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // The live editor canvas has now registered its pending redraw for the
+    // still-decoding src (CanvasStage's mount-time render effect). Saving
+    // again immediately — well within the ~300ms artificial decode delay —
+    // makes createThumbnail's offscreen canvas register its own pending
+    // redraw for the same src, on a different target.
+    await page.getByRole('button', { name: /保存/ }).click();
+
+    // Once decoding finishes, the *editor* canvas must still repaint on its
+    // own — no further interaction here forces a redraw. Against the
+    // pre-fix code (pendingRedraws keyed by src alone), this times out: the
+    // thumbnail's later registration silently drops the editor's callback,
+    // and the editor stays blank.
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(true);
   });
 });
