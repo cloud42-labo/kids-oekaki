@@ -7,7 +7,24 @@ const DB_VERSION = 1;
 const STORE_NAME = 'drawing-sessions';
 const LEGACY_CURRENT_KEY = 'current';
 const DRAFT_PREFIX = 'draft:';
-const SCHEMA_VERSION = 2;
+// v2: pre-draft-image-import format (every DrawingObject is a
+// stroke/blur/stamp). v3: adds the ImageObject variant (domain/drawing.ts)
+// for imported photos. A v2 document is always a valid v3 document (it can
+// never contain an image object), so it's safe to read-and-upgrade in place.
+// A v3 document is NOT safe for a client that only knows v2: that client's
+// object-rendering switch has no 'image' case, so it would silently treat an
+// ImageObject as an unrecognized stamp and the photo would vanish from the
+// canvas/exports while the user keeps editing and autosaving over it (Codex
+// review finding on PR #11, reviewed commit c43ce60a45). Bumping
+// SCHEMA_VERSION means a v2-only build's own (unchanged) strict `!==` guard
+// below now rejects a v3 document outright — "この保存データは新しい形式です"
+// — instead of misreading it.
+const SCHEMA_VERSION = 3;
+// Oldest schemaVersion this build still reads (and upgrades on load). Only
+// v2 predates this build; anything older already got folded into v2 by
+// migrateLegacyCurrent() below before it could reach the versioned
+// draft:-prefixed records this constant guards.
+const MIN_READABLE_SCHEMA_VERSION = 2;
 const THUMBNAIL_MAX_WIDTH = 180;
 const THUMBNAIL_MAX_HEIGHT = 128;
 
@@ -43,6 +60,21 @@ function validateHistory(history: DrawingHistory | undefined) {
   if (!history?.present || !Array.isArray(history.past) || !Array.isArray(history.future)) {
     throw new Error('保存データを安全に読み込めませんでした。');
   }
+}
+
+// Rejects anything this build doesn't know how to read (older than
+// MIN_READABLE_SCHEMA_VERSION, or newer than SCHEMA_VERSION — e.g. saved by
+// a build with a feature this one predates) rather than silently
+// misinterpreting its DrawingObject variants, and upgrades an older-but-
+// readable document's version label in place. Every readable older version
+// so far (currently just v2) is a strict structural subset of the current
+// one, so no field-level migration is needed beyond relabeling.
+function upgradeSchemaVersion(value: StoredDrawingSession): StoredDrawingSession {
+  if (value.schemaVersion === SCHEMA_VERSION) return value;
+  if (value.schemaVersion >= MIN_READABLE_SCHEMA_VERSION && value.schemaVersion < SCHEMA_VERSION) {
+    return { ...value, schemaVersion: SCHEMA_VERSION };
+  }
+  throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
 }
 
 function defaultName(history: DrawingHistory, savedAt: string) {
@@ -244,11 +276,9 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
     const sessions = await Promise.all(
       entries
         .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
-        .map(async ({ value }) => {
+        .map(async ({ value: rawValue }) => {
+          const value = upgradeSchemaVersion(rawValue);
           validateHistory(value.history);
-          if (value.schemaVersion !== SCHEMA_VERSION) {
-            throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
-          }
           return {
             ...value,
             name: normalizeName(value.name, value.history, value.savedAt),
@@ -265,11 +295,9 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
 export async function loadDrawingSession(id: string): Promise<StoredDrawingSession | null> {
   const db = await openDb();
   try {
-    const value = await readValue<StoredDrawingSession>(db, `${DRAFT_PREFIX}${id}`);
-    if (!value) return null;
-    if (value.schemaVersion !== SCHEMA_VERSION) {
-      throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
-    }
+    const rawValue = await readValue<StoredDrawingSession>(db, `${DRAFT_PREFIX}${id}`);
+    if (!rawValue) return null;
+    const value = upgradeSchemaVersion(rawValue);
     validateHistory(value.history);
     return {
       ...value,

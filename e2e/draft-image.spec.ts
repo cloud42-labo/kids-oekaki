@@ -855,4 +855,191 @@ test.describe('draft layer image import', () => {
 
     expect(isCloseToRed({ r, g, b })).toBe(true);
   });
+
+  // Codex review findings on the merge-conflict-resolution commit reviewed
+  // as c43ce60a45 (current head): documentStorage.ts's SCHEMA_VERSION never
+  // bumped despite the new ImageObject variant, and a preload/live-render
+  // eviction race between preloadDocumentImages() and the live editor's own
+  // ordinary (pruning) render.
+
+  test('⑱ 保存データはschemaVersion 3で書き込まれ、再開・再保存しても3のまま保たれる', async ({ page }) => {
+    // Regression test for the P2 schema-versioning finding: this PR added
+    // the ImageObject DrawingObject variant but originally left
+    // SCHEMA_VERSION unbumped at 2 (the version a pre-image-feature build
+    // already understands), so a stale service-worker tab or older
+    // installed build sharing the same IndexedDB would silently misread an
+    // image object as an unrecognized stamp instead of refusing to open it.
+    // Actually running an older build of the app against the same
+    // IndexedDB isn't practical inside this e2e suite, so this instead
+    // confirms what is practically testable here: the current build writes
+    // schemaVersion 3, and correctly reads its own schemaVersion-3 records
+    // back unchanged across a resume + resave. (Test ⑩ above separately
+    // exercises the other half — that a genuine schemaVersion-2 legacy
+    // record, which predates this feature, still loads without the
+    // now-stricter version guard rejecting it.)
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    const readSchemaVersion = () => page.evaluate(() => new Promise<number | undefined>((resolve, reject) => {
+      const request = indexedDB.open('kids-oekaki', 1);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction('drawing-sessions', 'readonly');
+        const getAllReq = tx.objectStore('drawing-sessions').getAll();
+        getAllReq.onsuccess = () => {
+          const rows = getAllReq.result as Array<{ schemaVersion?: number }>;
+          db.close();
+          resolve(rows.find((row) => row.schemaVersion !== undefined)?.schemaVersion);
+        };
+        getAllReq.onerror = () => reject(getAllReq.error ?? new Error('failed to read schemaVersion'));
+      };
+      request.onerror = () => reject(request.error ?? new Error('failed to open db'));
+    }));
+
+    expect(await readSchemaVersion()).toBe(3);
+
+    // Round-trips through a resume + resave unchanged (not bumped again,
+    // not reset).
+    await page.reload();
+    await page.locator('.saved-work-open').first().click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    expect(await readSchemaVersion()).toBe(3);
+  });
+
+  test('⑲ PNGエクスポート中に画像をけしても、書き出されるPNGには取り込み時点の画像が反映される', async ({ page }) => {
+    // Regression test for the P2 preload/live-render eviction race: export's
+    // preloadDocumentImages(document) awaits decode of a *snapshot* that
+    // already contains the photo. If the user clears the image while that
+    // decode is still in flight, the live editor's own next ordinary
+    // (pruning) render — CanvasStage's effect, reacting to the clear —
+    // used to evict the still-decoding src from renderer.ts's shared decode
+    // cache, because the *new* live document no longer references it, even
+    // though the export's own subsequent { prune: false } render still
+    // needs that exact cache entry once decoding finishes. The export would
+    // then start a second, unawaited decode and serialize the canvas
+    // immediately without the photo. installDelayedImageDecoding() widens
+    // the decode window deterministically, the same way tests ⑦/⑪/⑭/⑰ do
+    // for other call sites of this same underlying race class.
+    await installDelayedImageDecoding(page, 300);
+
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: /PNG/ }).click();
+    // Race: clear the drawing (removes the ImageObject from the *live*
+    // document) well within the ~300ms artificial decode delay the export's
+    // own preloadDocumentImages() call is still awaiting.
+    await page.getByRole('button', { name: '🧹 ぜんぶけす' }).click();
+
+    const download = await downloadPromise;
+    const downloadPath = await download.path();
+    expect(downloadPath).not.toBeNull();
+    const bytes = readFileSync(downloadPath!);
+    const dataUrl = `data:image/png;base64,${bytes.toString('base64')}`;
+
+    // installDelayedImageDecoding() above patches window.Image for the whole
+    // page, including any Image this verification step itself creates — so,
+    // like the thumbnail-decoding checks elsewhere in this file, this reads
+    // the exported PNG back via onload/onerror rather than the img.decode()
+    // test ⑥ (unaffected by that patch) uses, since decode() called right
+    // after setting .src would run before the artificially delayed native
+    // .src assignment actually lands.
+    const [r, g, b] = await page.evaluate(({ dataUrl, x, y }) => new Promise<number[]>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(Math.round(x), Math.round(y), 1, 1).data;
+        resolve([data[0], data[1], data[2]]);
+      };
+      img.onerror = () => reject(new Error('failed to decode exported PNG'));
+      img.src = dataUrl;
+    }), { dataUrl, x: DOC_WIDTH / 2, y: DOC_HEIGHT / 2 });
+
+    // Against the pre-fix code, this is white/blank: the clear evicted the
+    // still-decoding src mid-export, forcing a second, unawaited decode that
+    // the synchronous canvas.toBlob() serialize didn't wait for.
+    expect(isCloseToRed({ r, g, b })).toBe(true);
+
+    // The live canvas itself correctly reflects the clear — this isn't a
+    // case of the clear silently failing to take effect; only the
+    // already-in-flight export must be unaffected by it.
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+  });
+
+  test('⑳ 保存処理中に画像をけしても、その保存で書き込まれるサムネイルには取り込み時点の画像が反映される', async ({ page }) => {
+    // Regression test for the same P2 preload/live-render eviction race as
+    // test ⑲ above, on documentStorage.ts's other preloadDocumentImages()
+    // consumer: saveDrawingSession's createThumbnailAsync, which shares the
+    // exact same { prune: false } offscreen-render pattern as exportPng.ts.
+    await installDelayedImageDecoding(page, 300);
+
+    await startBlankDrawing(page);
+    await importSamplePhoto(page);
+    await page.getByRole('button', { name: /保存/ }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    await page.reload();
+    await page.locator('.saved-work-open').first().click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // Trigger another save — saveDrawingSession's createThumbnailAsync
+    // starts awaiting preloadDocumentImages() on the still-decoding restored
+    // photo — then immediately clear the drawing while that decode is in
+    // flight. The live editor's own ordinary render (reacting to the clear)
+    // must not evict the shared decode cache entry this save's own
+    // thumbnail render still needs once decoding finishes.
+    await page.getByRole('button', { name: /保存/ }).click();
+    await page.getByRole('button', { name: '🧹 ぜんぶけす' }).click();
+    await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
+
+    // The live canvas correctly reflects the clear.
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+
+    const thumbnail = await page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
+      const request = indexedDB.open('kids-oekaki', 1);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction('drawing-sessions', 'readonly');
+        const getAllReq = tx.objectStore('drawing-sessions').getAll();
+        getAllReq.onsuccess = () => {
+          const rows = getAllReq.result as Array<{ thumbnail?: string }>;
+          db.close();
+          resolve(rows.find((row) => row.thumbnail)?.thumbnail);
+        };
+        getAllReq.onerror = () => reject(getAllReq.error ?? new Error('failed to read thumbnail'));
+      };
+      request.onerror = () => reject(request.error ?? new Error('failed to open db'));
+    }));
+    expect(thumbnail).toBeTruthy();
+
+    const [r, g, b] = await page.evaluate((dataUrl) => new Promise<number[]>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(Math.round(img.naturalWidth / 2), Math.round(img.naturalHeight / 2), 1, 1).data;
+        resolve([data[0], data[1], data[2]]);
+      };
+      img.onerror = () => reject(new Error('failed to decode thumbnail'));
+      img.src = dataUrl;
+    }), thumbnail!);
+
+    // Against the pre-fix code, this is white/blank: the clear evicted the
+    // still-decoding src mid-save, forcing createThumbnail's synchronous
+    // offscreen render to skip the photo entirely for this save.
+    expect(isCloseToRed({ r, g, b })).toBe(true);
+  });
 });

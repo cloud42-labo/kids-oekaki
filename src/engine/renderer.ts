@@ -77,6 +77,35 @@ const imageElements = new Map<string, HTMLImageElement>();
 // target.
 const pendingRedraws = new Map<string, Map<CanvasRenderingContext2D, () => void>>();
 
+// Ref-counts srcs that an in-flight preloadDocumentImages() call (PNG export,
+// thumbnail generation) still needs, even if nothing in the *live* document
+// references them any more by the time pruneImageCache runs. Without this, a
+// still-decoding src can be evicted mid-preload by the live editor's own
+// ordinary (pruning) render — e.g. the user clears the image, undoes the
+// import, or switches documents while an export/thumbnail is awaiting the
+// same src — and although the preload's own Image element still resolves
+// (its 'load' listener is attached directly to that element, independent of
+// this cache), the map entry callers look it up through is already gone.
+// The { prune: false } offscreen render that follows then finds no ready
+// element, starts a second decode from scratch, and serializes immediately
+// without it (Codex review finding on PR #11, reviewed commit c43ce60a45).
+// A ref count (not a boolean) is needed because more than one preload
+// (export + thumbnail, or two overlapping exports) can be in flight for the
+// same src at once. Set/cleared only by preloadDocumentImages() below, in a
+// finally, so a rejected/aborted preload still releases its pin.
+const pinnedImageSrcs = new Map<string, number>();
+
+function pinImageSrc(src: string) {
+  pinnedImageSrcs.set(src, (pinnedImageSrcs.get(src) ?? 0) + 1);
+}
+
+function unpinImageSrc(src: string) {
+  const count = pinnedImageSrcs.get(src);
+  if (count === undefined) return;
+  if (count <= 1) pinnedImageSrcs.delete(src);
+  else pinnedImageSrcs.set(src, count - 1);
+}
+
 function readyImageElement(src: string): HTMLImageElement | undefined {
   const img = imageElements.get(src);
   return img && img.complete && img.naturalWidth > 0 ? img : undefined;
@@ -92,6 +121,31 @@ function readyImageElement(src: string): HTMLImageElement | undefined {
 // on screen; undo/redo across a src that's temporarily out of the present
 // document just costs a re-decode if it comes back, which is cheap for a
 // single reference photo.
+//
+// The two maps are pruned on *different* conditions, deliberately:
+//
+// - imageElements (the decoded element) is kept for a pinned src even once
+//   it's unreachable from `document`, because an in-flight
+//   preloadDocumentImages() consumer (PNG export, thumbnail generation) may
+//   still need to find it ready once decoding finishes — see pinnedImageSrcs
+//   above.
+// - pendingRedraws is pruned by live-reachability alone, ignoring the pin.
+//   Its entries are per-*target* "redraw me once ready" callbacks, and the
+//   only target that ever registers one is a render that found the image
+//   *not yet* decoded (getImageElement's not-ready branch) — a { prune:
+//   false } offscreen render never does, because it only ever runs after
+//   preloadDocumentImages() has already awaited the same src to readiness.
+//   So the only realistic entries here belong to the *live* canvas's own
+//   earlier render (e.g. right after resuming a session with a
+//   still-decoding photo). If the user then clears/undoes that image before
+//   decode finishes, the live canvas's next render no longer iterates over
+//   that (now absent) ImageObject at all, so it never re-registers or
+//   replaces its stale callback — which still closes over the *old*
+//   document snapshot that had the photo. Leaving that stale callback alive
+//   (e.g. by pinning it alongside imageElements) would fire it once decoding
+//   completes and repaint the removed photo back onto the live canvas, even
+//   though the document no longer contains it. Pruning pendingRedraws
+//   unconditionally here is what discards that stale callback instead.
 function pruneImageCache(document: DrawingDocument) {
   const liveSrcs = new Set<string>();
   for (const layer of document.layers) {
@@ -100,8 +154,12 @@ function pruneImageCache(document: DrawingDocument) {
     }
   }
   for (const src of imageElements.keys()) {
-    if (!liveSrcs.has(src)) {
+    if (!liveSrcs.has(src) && !pinnedImageSrcs.has(src)) {
       imageElements.delete(src);
+    }
+  }
+  for (const src of pendingRedraws.keys()) {
+    if (!liveSrcs.has(src)) {
       pendingRedraws.delete(src);
     }
   }
@@ -135,10 +193,24 @@ export async function preloadDocumentImages(document: DrawingDocument): Promise<
       if (object.type === 'image') sources.add(object.src);
     }
   }
-  // One broken image (corrupt data, unlikely but not impossible after a
-  // schema-tolerant restore) must not block the rest of the document from
-  // exporting/rendering.
-  await Promise.all(Array.from(sources).map((src) => preloadImageAsset(src).catch(() => undefined)));
+  // Pin every source for the whole await below, not just while this
+  // function's own promise is pending on it — the live editor's ordinary
+  // (pruning) render can run at any point during this await (a user action
+  // dispatches a document mutation, e.g. clearing/undoing the image or
+  // switching documents, while this caller is still awaiting decode), and
+  // without a pin it would evict a src no longer reachable from *that* live
+  // document even though the caller here (PNG export, thumbnail generation)
+  // still needs it once decoding finishes. See pinnedImageSrcs/
+  // pruneImageCache above.
+  for (const src of sources) pinImageSrc(src);
+  try {
+    // One broken image (corrupt data, unlikely but not impossible after a
+    // schema-tolerant restore) must not block the rest of the document from
+    // exporting/rendering.
+    await Promise.all(Array.from(sources).map((src) => preloadImageAsset(src).catch(() => undefined)));
+  } finally {
+    for (const src of sources) unpinImageSrc(src);
+  }
 }
 
 // Returns the decoded element if ready, otherwise ensures decoding is under
