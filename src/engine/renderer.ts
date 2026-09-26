@@ -121,10 +121,107 @@ function drawNeonStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
   ctx.restore();
 }
 
+// stroke.id由来の決定論的な擬似乱数(-1〜1)。Math.random()は使わない
+// (通常表示・Undo/Redo・保存/再開・PNG exportのたびにDocumentから
+// 再生されるため、都度違う値になると再生結果が一致しなくなる)。
+function seededJitter(seed: string, index: number): number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) | 0;
+  h = (h * 31 + index) | 0;
+  h ^= h << 13;
+  h ^= h >>> 17;
+  h ^= h << 5;
+  return ((h >>> 0) / 0xffffffff) * 2 - 1;
+}
+
+// 鉛筆: 単なる細い線ではなく、かすれ・濃淡のある画材感を出す。1本の
+// ストロークを短いセグメントへ分割し、筆圧とseed由来の揺らぎで
+// セグメントごとに太さ・濃さをわずかに変える(=紙に鉛筆の粒立ちが
+// あるように見える)。
+function drawPencilStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.strokeStyle = stroke.color;
+  ctx.fillStyle = stroke.color;
+
+  const baseWidth = Math.max(1, stroke.size * 0.55);
+
+  if (stroke.points.length === 1) {
+    const p = stroke.points[0];
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, baseWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  for (let i = 0; i < stroke.points.length - 1; i += 1) {
+    const a = stroke.points[i];
+    const b = stroke.points[i + 1];
+    const pressure = (a.pressure + b.pressure) / 2;
+    const jitter = seededJitter(stroke.seed ?? stroke.id, i);
+    ctx.globalAlpha = Math.max(0.35, Math.min(0.9, 0.55 + pressure * 0.3 + jitter * 0.12));
+    ctx.lineWidth = Math.max(0.6, baseWidth * (0.75 + pressure * 0.25) + jitter * baseWidth * 0.15);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// 筆: 一定の線幅ではなく、筆圧に加えてストロークの穂先(始点・終点)へ
+// 向けてだんだん細くなる抑揚をつける。単なる線幅違いのブラシと区別する。
+function drawBrushStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.strokeStyle = stroke.color;
+  ctx.fillStyle = stroke.color;
+  ctx.globalAlpha = 1;
+
+  const n = stroke.points.length;
+  const baseWidth = Math.max(2, stroke.size);
+
+  if (n === 1) {
+    const p = stroke.points[0];
+    const width = baseWidth * (0.35 + p.pressure * 0.65);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, width / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  const taperPoints = Math.min(6, Math.max(2, Math.floor(n / 4)));
+  const lastSegment = n - 2;
+  for (let i = 0; i <= lastSegment; i += 1) {
+    const a = stroke.points[i];
+    const b = stroke.points[i + 1];
+    const pressure = (a.pressure + b.pressure) / 2;
+    const startTaper = Math.min(1, i / taperPoints);
+    const endTaper = Math.min(1, (lastSegment - i) / taperPoints);
+    const taperFactor = Math.min(startTaper, endTaper);
+    const width = Math.max(1, baseWidth * (0.35 + pressure * 0.65) * (0.25 + 0.75 * taperFactor));
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
   if (stroke.points.length === 0) return;
   if (stroke.brush === 'rainbow') return drawRainbowStroke(ctx, stroke);
   if (stroke.brush === 'neon') return drawNeonStroke(ctx, stroke);
+  if (stroke.brush === 'pencil') return drawPencilStroke(ctx, stroke);
+  if (stroke.brush === 'brush') return drawBrushStroke(ctx, stroke);
 
   ctx.save();
   ctx.lineCap = 'round';
@@ -332,6 +429,29 @@ function pruneLayerCache(document: DrawingDocument) {
   }
 }
 
+// 鉛筆・筆はセグメントごとに太さ・濃さを変えるため、1本のstrokeを
+// beginPath/stroke呼び出し複数回に分けて描く(通常のpen/markerは
+// 1回のstroke呼び出しで済む)。ドラッグ中のライブpreviewは指の動きの
+// たびにrenderDocumentが呼ばれ、そのたびに毎回蓄積済みの全pointsを
+// 再生するため、ストロークが伸びるほど毎フレームの描画コストが増え続け
+// (低スペックAndroid端末で顕著)、低スペックAndroid端末でのペン入力の
+// もたつきにつながる(Codexレビュー指摘)。previewの間だけ、鉛筆・筆の
+// 対象pointsを直近の点数へ絞る。commit時(onCommitStroke)には常に完全な
+// pointsを使うため、保存・エクスポートされる最終結果はこのトリミングの
+// 影響を受けない。
+const MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS = 48;
+
+function previewSafeDraftObject(object: DrawingObject): DrawingObject {
+  if (
+    object.type === 'stroke'
+    && (object.brush === 'pencil' || object.brush === 'brush')
+    && object.points.length > MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS
+  ) {
+    return { ...object, points: object.points.slice(-MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS) };
+  }
+  return object;
+}
+
 export function renderDocument(
   target: CanvasRenderingContext2D,
   document: DrawingDocument,
@@ -363,7 +483,7 @@ export function renderDocument(
       previewCtx.globalAlpha = 1;
       previewCtx.drawImage(surface, 0, 0);
       for (const draftObject of draftObjects) {
-        renderObject(previewCtx, draftObject, document.width, document.height);
+        renderObject(previewCtx, previewSafeDraftObject(draftObject), document.width, document.height);
       }
       target.drawImage(preview, 0, 0);
     } else {

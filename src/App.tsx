@@ -27,6 +27,18 @@ function componentHex(value: number) {
   return Math.max(0, Math.min(255, value)).toString(16).padStart(2, '0');
 }
 
+// スタンプ作成UIを廃止したため、mode:'stamp'は選択不可能な状態になった。
+// しかしstamp UI廃止より前に保存されたセッションはsettings.mode:'stamp'を
+// そのまま持っている可能性があり、そのまま復元するとツールバーはどのボタン
+// も選択されて見えないのにCanvasStageのpointerdownは(stamp分岐が無くなった
+// ため)以前選んでいたbrush(消しゴム・ぼかし等の可能性がある)で描画して
+// しまう(Codexレビュー指摘)。復元時にmode:'stamp'を安全なbrushへ
+// 正規化する。
+function normalizeRestoredSettings(settings: ToolSettings): ToolSettings {
+  if (settings.mode !== 'stamp') return settings;
+  return { ...settings, mode: 'brush', brush: 'pen' };
+}
+
 export default function App() {
   const [started, setStarted] = useState(false);
   const [savedSessions, setSavedSessions] = useState<StoredDrawingSession[]>([]);
@@ -113,7 +125,7 @@ export default function App() {
     const session = savedSessions.find((item) => item.id === sessionId);
     if (!session) return;
     drawing.restoreHistory(session.history);
-    setSettings(session.settings ?? DEFAULT_SETTINGS);
+    setSettings(normalizeRestoredSettings(session.settings ?? DEFAULT_SETTINGS));
     setMirrorEnabled(false);
     setActiveSessionId(session.id);
     setSaveState('saved');
@@ -222,7 +234,6 @@ export default function App() {
           mirrorEnabled={mirrorEnabled}
           onCommitStroke={drawing.commitStroke}
           onCommitBlur={drawing.commitBlur}
-          onCommitStamp={drawing.commitStamp}
           onCommitMirroredStroke={drawing.commitMirroredStroke}
         />
         <LayerPanel

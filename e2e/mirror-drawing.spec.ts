@@ -13,7 +13,7 @@ async function startBlankDrawing(page: Page) {
   await page.goto('/');
   await page.getByRole('button', { name: /まっしろ/ }).click();
   await page.getByRole('button', { name: /たて/ }).click();
-  await expect(page.locator('.stamp-menu')).toBeVisible();
+  await expect(page.locator('.canvas-frame canvas')).toBeVisible();
 }
 
 function mirrorToggle(page: Page) {

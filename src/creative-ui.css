@@ -26,8 +26,24 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  flex: 0 0 auto;
 }
+
+/* primary-toolsは道具の数が増えるほど幅を必要とするが、もどる/戻す/
+   やり直す/保存/PNGといった.creative-actions側は常に画面内で押せる
+   ことを優先する。primary-toolsだけをmin-width:0で縮小可能にしshrink分は
+   横スクロールで補うことで、道具が増えてもcreative-actionsが画面外へ
+   押し出されてクリップされる(=保存・PNGが押せなくなる)ことがないように
+   する(Codexレビュー指摘: 鉛筆・筆追加でツールバー全体が収まらない幅が
+   拡大した)。 */
+.primary-tools {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.primary-tools::-webkit-scrollbar { display: none; }
+
+.creative-actions { flex: 0 0 auto; }
 
 .compact-tool {
   min-width: 52px;
@@ -53,38 +69,6 @@
 }
 .compact-tool-icon { font-size: 20px; line-height: 1; }
 .compact-tool-label { font-size: 10px; font-weight: 700; white-space: nowrap; }
-
-.stamp-menu { position: relative; }
-.stamp-menu summary { list-style: none; }
-.stamp-menu summary::-webkit-details-marker { display: none; }
-.stamp-popover {
-  position: fixed;
-  width: 170px;
-  padding: 8px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  border: 1px solid #ced4da;
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
-  z-index: 100;
-}
-.stamp-popover button {
-  min-height: 48px;
-  border: 0;
-  border-radius: 8px;
-  background: #f1f3f5;
-  font-size: 12px;
-  font-weight: 700;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-}
-.stamp-popover button.active { background: #dbe4ff; color: #2948a5; }
-.stamp-popover button span { font-size: 18px; }
 
 .compact-size-control {
   width: 150px;
