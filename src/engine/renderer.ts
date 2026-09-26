@@ -8,7 +8,6 @@ type LayerCache = {
 
 const layerSurfaces = new Map<string, LayerCache>();
 let draftSurface: HTMLCanvasElement | null = null;
-let blurSurface: HTMLCanvasElement | null = null;
 let blurMaskSurface: HTMLCanvasElement | null = null;
 
 function getLayerSurface(layer: DrawingLayer, width: number, height: number) {
@@ -31,13 +30,6 @@ function getDraftSurface(width: number, height: number) {
   if (draftSurface.width !== width) draftSurface.width = width;
   if (draftSurface.height !== height) draftSurface.height = height;
   return draftSurface;
-}
-
-function getBlurSurface(width: number, height: number) {
-  if (!blurSurface) blurSurface = document.createElement('canvas');
-  if (blurSurface.width !== width) blurSurface.width = width;
-  if (blurSurface.height !== height) blurSurface.height = height;
-  return blurSurface;
 }
 
 function getBlurMaskSurface(width: number, height: number) {
@@ -188,9 +180,97 @@ function drawBlurMask(ctx: CanvasRenderingContext2D, blur: BlurObject, offsetX: 
   ctx.restore();
 }
 
-// ぼかしは「色を重ねる」のではなく、操作時点までの同一レイヤー画素を
-// 局所領域だけblurしたコピーに置き換える。effect自体をDocumentへ保持するため、
-// 通常表示・Undo/Redo・途中保存・PNG exportで同じ順序を決定論的に再生できる。
+// 1次元の箱型フィルタ(box blur)。累積和で境界をclampしながら
+// [i-radius, i+radius]の合計を返す(O(length))。
+function boxSum1D(values: Float32Array, length: number, radius: number): Float32Array {
+  const prefix = new Float32Array(length + 1);
+  for (let i = 0; i < length; i += 1) prefix[i + 1] = prefix[i] + values[i];
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i += 1) {
+    const start = Math.max(0, i - radius);
+    const end = Math.min(length - 1, i + radius);
+    out[i] = prefix[end + 1] - prefix[start];
+  }
+  return out;
+}
+
+function boxBlur2D(src: Float32Array, width: number, height: number, radius: number): Float32Array {
+  const horizontal = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    const offset = y * width;
+    const row = boxSum1D(src.subarray(offset, offset + width), width, radius);
+    horizontal.set(row, offset);
+  }
+  const result = new Float32Array(width * height);
+  const column = new Float32Array(height);
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) column[y] = horizontal[y * width + x];
+    const summed = boxSum1D(column, height, radius);
+    for (let y = 0; y < height; y += 1) result[y * width + x] = summed[y];
+  }
+  return result;
+}
+
+// 近傍の不透明画素だけを対象にした色の重み付き平均(=alphaで重み付けした
+// box blur)を計算する。透明画素はweight 0として扱われるため、境界の
+// 「何も無い場所」の色(≒台紙の白)を混ぜ込むことがない。
+// alpha(不透明度)は、既存の不透明画素では絶対に下げない
+// (max(元のalpha, 近傍alphaの単純平均))。指でこすって隣の色を
+// 引きずり込むスマッジ本来の動きとして、境界のすぐ隣の透明画素へ
+// alphaが少しだけ広がることは許容するが、それは常に周囲の実際の絵の具の
+// 色で埋まるのであって、透明=白として混ぜ込まれるのではない。
+function smudgeColors(imageData: ImageData, radius: number) {
+  const { data, width, height } = imageData;
+  const n = width * height;
+  const weightedR = new Float32Array(n);
+  const weightedG = new Float32Array(n);
+  const weightedB = new Float32Array(n);
+  const alphaFrac = new Float32Array(n);
+  const ones = new Float32Array(n).fill(1);
+  for (let i = 0; i < n; i += 1) {
+    const o = i * 4;
+    const a = data[o + 3] / 255;
+    weightedR[i] = data[o] * a;
+    weightedG[i] = data[o + 1] * a;
+    weightedB[i] = data[o + 2] * a;
+    alphaFrac[i] = a;
+  }
+
+  const sumR = boxBlur2D(weightedR, width, height, radius);
+  const sumG = boxBlur2D(weightedG, width, height, radius);
+  const sumB = boxBlur2D(weightedB, width, height, radius);
+  const sumAlpha = boxBlur2D(alphaFrac, width, height, radius);
+  const windowCount = boxBlur2D(ones, width, height, radius);
+
+  const mixedR = new Uint8ClampedArray(n);
+  const mixedG = new Uint8ClampedArray(n);
+  const mixedB = new Uint8ClampedArray(n);
+  const mixedAlpha = new Uint8ClampedArray(n);
+  for (let i = 0; i < n; i += 1) {
+    if (sumAlpha[i] > 0.0001) {
+      mixedR[i] = sumR[i] / sumAlpha[i];
+      mixedG[i] = sumG[i] / sumAlpha[i];
+      mixedB[i] = sumB[i] / sumAlpha[i];
+    } else {
+      const o = i * 4;
+      mixedR[i] = data[o];
+      mixedG[i] = data[o + 1];
+      mixedB[i] = data[o + 2];
+    }
+    const averageAlpha = windowCount[i] > 0 ? sumAlpha[i] / windowCount[i] : 0;
+    mixedAlpha[i] = Math.max(alphaFrac[i], averageAlpha) * 255;
+  }
+  return { mixedR, mixedG, mixedB, mixedAlpha };
+}
+
+// ぼかしは「透明度を薄めて台紙を透かす」のではなく、指でこすって隣接色
+// 同士を混ぜる「スマッジ」として実装する。同一レイヤーの画素だけを対象に
+// (他レイヤー・台紙はrenderLayerの時点で分離済み)、不透明画素の色だけを
+// alpha加重平均で混ぜ、各画素自身のalpha(不透明度)は変えない。そのため
+// 赤と青の境界をなぞると中間色(紫)が生まれる一方、透明領域や白い台紙が
+// 色として混ぜ込まれたり、境界が白っぽく薄まったりすることがない。
+// effect自体をDocumentへ保持するため、通常表示・Undo/Redo・途中保存・
+// PNG exportで同じ結果を決定論的に再生できる。
 function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
   if (!blur.points.length) return;
   const strength = Math.max(1, Math.min(20, blur.strength));
@@ -213,39 +293,31 @@ function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth:
   const width = Math.max(1, ex - sx);
   const height = Math.max(1, ey - sy);
 
-  const blurred = getBlurSurface(width, height);
-  const blurCtx = blurred.getContext('2d');
   const mask = getBlurMaskSurface(width, height);
   const maskCtx = mask.getContext('2d');
-  if (!blurCtx || !maskCtx) return;
-
-  blurCtx.save();
-  blurCtx.clearRect(0, 0, width, height);
-  blurCtx.globalAlpha = 1;
-  blurCtx.globalCompositeOperation = 'source-over';
-  blurCtx.filter = `blur(${strength}px)`;
-  blurCtx.drawImage(ctx.canvas, sx, sy, width, height, 0, 0, width, height);
-  blurCtx.filter = 'none';
-  blurCtx.restore();
-
+  if (!maskCtx) return;
   maskCtx.clearRect(0, 0, width, height);
   drawBlurMask(maskCtx, blur, sx, sy);
+  const maskData = maskCtx.getImageData(0, 0, width, height).data;
 
-  // ぼかしたコピーをブラシ形状だけ残す。
-  blurCtx.save();
-  blurCtx.globalCompositeOperation = 'destination-in';
-  blurCtx.globalAlpha = 1;
-  blurCtx.drawImage(mask, 0, 0);
-  blurCtx.restore();
+  const region = ctx.getImageData(sx, sy, width, height);
+  const { mixedR, mixedG, mixedB, mixedAlpha } = smudgeColors(region, strength);
 
-  // 元画素も同じマスクで消してから、ぼかした結果で置き換える。
-  ctx.save();
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = 'destination-out';
-  ctx.drawImage(mask, sx, sy);
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.drawImage(blurred, sx, sy);
-  ctx.restore();
+  const out = region.data;
+  const pixelCount = width * height;
+  for (let i = 0; i < pixelCount; i += 1) {
+    const maskAlpha = maskData[i * 4 + 3] / 255;
+    if (maskAlpha <= 0) continue;
+    const o = i * 4;
+    out[o] = out[o] + (mixedR[i] - out[o]) * maskAlpha;
+    out[o + 1] = out[o + 1] + (mixedG[i] - out[o + 1]) * maskAlpha;
+    out[o + 2] = out[o + 2] + (mixedB[i] - out[o + 2]) * maskAlpha;
+    // alphaはmixedAlpha(=max(元のalpha, 近傍alphaの平均))へ寄せる。
+    // 既存の不透明画素のalphaが下がることはなく、境界のすぐ隣の透明
+    // 画素にだけ周囲の絵の具のalphaがにじむ。
+    out[o + 3] = out[o + 3] + (mixedAlpha[i] - out[o + 3]) * maskAlpha;
+  }
+  ctx.putImageData(region, sx, sy);
 }
 
 function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject, { type: 'stamp' }>) {
