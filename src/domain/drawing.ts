@@ -6,7 +6,7 @@ export const CANVAS_HEIGHT = 1131;
 export type Orientation = 'portrait' | 'landscape';
 
 export type TemplateKind = 'blank' | '4koma' | 'diary';
-export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
+export type BrushKind = 'pen' | 'pencil' | 'brush' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {
   x: number;

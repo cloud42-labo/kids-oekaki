@@ -222,7 +222,6 @@ export default function App() {
           mirrorEnabled={mirrorEnabled}
           onCommitStroke={drawing.commitStroke}
           onCommitBlur={drawing.commitBlur}
-          onCommitStamp={drawing.commitStamp}
           onCommitMirroredStroke={drawing.commitMirroredStroke}
         />
         <LayerPanel
