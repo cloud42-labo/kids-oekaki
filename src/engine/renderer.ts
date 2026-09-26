@@ -1,5 +1,12 @@
-import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, StrokeObject } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, ImageObject, StrokeObject } from '../domain/drawing';
+import { IMAGE_HANDLE_VISUAL_RADIUS } from '../domain/drawing';
 import { drawTemplate } from '../domain/templates';
+
+export type ImageBox = { x: number; y: number; width: number; height: number };
+// While an image is selected (CanvasStage, 'image' tool mode), its box —
+// live values during a drag/resize, or its committed values while idle —
+// overrides the committed object and gets a selection outline + handle.
+export type ImageSelection = ImageBox & { id: string };
 
 type LayerCache = {
   canvas: HTMLCanvasElement;
@@ -45,6 +52,239 @@ function getBlurMaskSurface(width: number, height: number) {
   if (blurMaskSurface.width !== width) blurMaskSurface.width = width;
   if (blurMaskSurface.height !== height) blurMaskSurface.height = height;
   return blurMaskSurface;
+}
+
+// Imported photos are decoded once per src (data URL) and cached here,
+// never re-decoded per frame. Unlike layerSurfaces this is keyed by the
+// image bytes, not an object/layer id, so re-importing an identical photo
+// (or undo/redo across history entries that share the same src string)
+// reuses the same decoded element.
+const imageElements = new Map<string, HTMLImageElement>();
+
+// The redraw ("onReady") callbacks registered for a src that's still
+// decoding — see getImageElement below. Keyed by src, then by the calling
+// CanvasRenderingContext2D ("target"): the live editor canvas and an
+// offscreen canvas such as documentStorage.ts's createThumbnail() can both
+// be waiting on the same still-decoding image at once (e.g. autosave firing
+// while a freshly restored photo is still decoding onto the editor), and
+// each needs its own redraw to fire when decoding finishes — keying by src
+// alone would let the second target's registration silently overwrite the
+// first's, leaving that target blank until some unrelated document change.
+// The outer Map having an entry for a src also doubles as "a `load`
+// listener is already attached for this src", so callers never stack more
+// than one *native* listener per source — it fans out to every registered
+// target's callback when it fires, rather than adding a native listener per
+// target.
+const pendingRedraws = new Map<string, Map<CanvasRenderingContext2D, () => void>>();
+
+// Ref-counts srcs that an in-flight preloadDocumentImages() call (PNG export,
+// thumbnail generation) still needs, even if nothing in the *live* document
+// references them any more by the time pruneImageCache runs. Without this, a
+// still-decoding src can be evicted mid-preload by the live editor's own
+// ordinary (pruning) render — e.g. the user clears the image, undoes the
+// import, or switches documents while an export/thumbnail is awaiting the
+// same src — and although the preload's own Image element still resolves
+// (its 'load' listener is attached directly to that element, independent of
+// this cache), the map entry callers look it up through is already gone.
+// The { prune: false } offscreen render that follows then finds no ready
+// element, starts a second decode from scratch, and serializes immediately
+// without it (Codex review finding on PR #11, reviewed commit c43ce60a45).
+// A ref count (not a boolean) is needed because more than one preload
+// (export + thumbnail, or two overlapping exports) can be in flight for the
+// same src at once. Set/cleared only by preloadDocumentImages() below, in a
+// finally, so a rejected/aborted preload still releases its pin.
+const pinnedImageSrcs = new Map<string, number>();
+
+function pinImageSrc(src: string) {
+  pinnedImageSrcs.set(src, (pinnedImageSrcs.get(src) ?? 0) + 1);
+}
+
+function unpinImageSrc(src: string) {
+  const count = pinnedImageSrcs.get(src);
+  if (count === undefined) return;
+  if (count <= 1) pinnedImageSrcs.delete(src);
+  else pinnedImageSrcs.set(src, count - 1);
+}
+
+function readyImageElement(src: string): HTMLImageElement | undefined {
+  const img = imageElements.get(src);
+  return img && img.complete && img.naturalWidth > 0 ? img : undefined;
+}
+
+// Drops decode-cache entries (and any still-pending redraw callback) for
+// sources no longer referenced by any image object in `document`. Without
+// this, every successful import/undo/delete/new-drawing leaves its decoded
+// HTMLImageElement (up to ~10MB for a max-size photo) and data URL parked
+// in imageElements for the rest of the app's lifetime, which adds up over a
+// long session. Called on every renderDocument — same pattern as
+// pruneLayerCache — so it stays in sync with whatever document is actually
+// on screen; undo/redo across a src that's temporarily out of the present
+// document just costs a re-decode if it comes back, which is cheap for a
+// single reference photo.
+//
+// The two maps are pruned on *different* conditions, deliberately:
+//
+// - imageElements (the decoded element) is kept for a pinned src even once
+//   it's unreachable from `document`, because an in-flight
+//   preloadDocumentImages() consumer (PNG export, thumbnail generation) may
+//   still need to find it ready once decoding finishes — see pinnedImageSrcs
+//   above.
+// - pendingRedraws is pruned by live-reachability alone, ignoring the pin.
+//   Its entries are per-*target* "redraw me once ready" callbacks, and the
+//   only target that ever registers one is a render that found the image
+//   *not yet* decoded (getImageElement's not-ready branch) — a { prune:
+//   false } offscreen render never does, because it only ever runs after
+//   preloadDocumentImages() has already awaited the same src to readiness.
+//   So the only realistic entries here belong to the *live* canvas's own
+//   earlier render (e.g. right after resuming a session with a
+//   still-decoding photo). If the user then clears/undoes that image before
+//   decode finishes, the live canvas's next render no longer iterates over
+//   that (now absent) ImageObject at all, so it never re-registers or
+//   replaces its stale callback — which still closes over the *old*
+//   document snapshot that had the photo. Leaving that stale callback alive
+//   (e.g. by pinning it alongside imageElements) would fire it once decoding
+//   completes and repaint the removed photo back onto the live canvas, even
+//   though the document no longer contains it. Pruning pendingRedraws
+//   unconditionally here is what discards that stale callback instead.
+function pruneImageCache(document: DrawingDocument) {
+  const liveSrcs = new Set<string>();
+  for (const layer of document.layers) {
+    for (const object of layer.objects) {
+      if (object.type === 'image') liveSrcs.add(object.src);
+    }
+  }
+  for (const src of imageElements.keys()) {
+    if (!liveSrcs.has(src) && !pinnedImageSrcs.has(src)) {
+      imageElements.delete(src);
+    }
+  }
+  for (const src of pendingRedraws.keys()) {
+    if (!liveSrcs.has(src)) {
+      pendingRedraws.delete(src);
+    }
+  }
+}
+
+// Starts (or reuses) decoding `src` and resolves once it can be drawn.
+// Used directly by utils/exportPng.ts so export never races a cold cache.
+export function preloadImageAsset(src: string): Promise<void> {
+  const existing = readyImageElement(src);
+  if (existing) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let img = imageElements.get(src);
+    if (!img) {
+      img = new Image();
+      img.decoding = 'async';
+      imageElements.set(src, img);
+      img.src = src;
+    }
+    img.addEventListener('load', () => resolve(), { once: true });
+    img.addEventListener('error', () => {
+      imageElements.delete(src);
+      reject(new Error('画像を読み込めませんでした'));
+    }, { once: true });
+  });
+}
+
+export async function preloadDocumentImages(document: DrawingDocument): Promise<void> {
+  const sources = new Set<string>();
+  for (const layer of document.layers) {
+    for (const object of layer.objects) {
+      if (object.type === 'image') sources.add(object.src);
+    }
+  }
+  // Pin every source for the whole await below, not just while this
+  // function's own promise is pending on it — the live editor's ordinary
+  // (pruning) render can run at any point during this await (a user action
+  // dispatches a document mutation, e.g. clearing/undoing the image or
+  // switching documents, while this caller is still awaiting decode), and
+  // without a pin it would evict a src no longer reachable from *that* live
+  // document even though the caller here (PNG export, thumbnail generation)
+  // still needs it once decoding finishes. See pinnedImageSrcs/
+  // pruneImageCache above.
+  for (const src of sources) pinImageSrc(src);
+  try {
+    // One broken image (corrupt data, unlikely but not impossible after a
+    // schema-tolerant restore) must not block the rest of the document from
+    // exporting/rendering.
+    await Promise.all(Array.from(sources).map((src) => preloadImageAsset(src).catch(() => undefined)));
+  } finally {
+    for (const src of sources) unpinImageSrc(src);
+  }
+}
+
+// Returns the decoded element if ready, otherwise ensures decoding is under
+// way and calls `onReady` once it completes, so the caller can trigger
+// exactly one follow-up redraw instead of polling. The underlying Image may
+// already have been created by an earlier, unrelated caller — e.g.
+// preloadDocumentImages() warming the cache on session resume, whose own
+// promise-based listener doesn't touch the canvas — so a redraw callback is
+// tracked on every call that finds the src not yet ready, rather than only
+// when this call is the one creating the Image (regressing the "restored
+// image never redraws" fix). But while a cold image is decoding, every
+// render of it reaches this function again — moving the selection chrome
+// alone can call it many times a second — so a *native* `load` listener is
+// only ever attached once per src (guarded by pendingRedraws already having
+// an entry for it); each subsequent call from the *same* target just
+// replaces that target's own pending callback with its own, more current
+// one. Calls from a *different* target (e.g. the live editor canvas vs.
+// documentStorage.ts's createThumbnail() offscreen canvas, both waiting on
+// the same still-decoding src) register alongside it instead of overwriting
+// it, so every distinct target that asked gets its own redraw fired once
+// decoding finishes — without reintroducing a native listener per target.
+function getImageElement(target: CanvasRenderingContext2D, src: string, onReady: () => void): HTMLImageElement | undefined {
+  const ready = readyImageElement(src);
+  if (ready) return ready;
+  let img = imageElements.get(src);
+  if (!img) {
+    img = new Image();
+    img.decoding = 'async';
+    img.addEventListener('error', () => {
+      imageElements.delete(src);
+      pendingRedraws.delete(src);
+    }, { once: true });
+    imageElements.set(src, img);
+    img.src = src;
+  }
+  if (!pendingRedraws.has(src)) {
+    pendingRedraws.set(src, new Map());
+    img.addEventListener('load', () => {
+      const callbacks = pendingRedraws.get(src);
+      pendingRedraws.delete(src);
+      callbacks?.forEach((callback) => callback());
+    }, { once: true });
+  }
+  pendingRedraws.get(src)!.set(target, onReady);
+  return undefined;
+}
+
+function drawImageObject(target: CanvasRenderingContext2D, object: ImageObject, box: ImageBox, onReady: () => void) {
+  const img = getImageElement(target, object.src, onReady);
+  if (!img) return; // not decoded yet — onReady triggers a follow-up render
+  target.save();
+  target.imageSmoothingEnabled = true;
+  target.imageSmoothingQuality = 'high';
+  target.drawImage(img, box.x, box.y, box.width, box.height);
+  target.restore();
+}
+
+function drawImageSelectionChrome(target: CanvasRenderingContext2D, box: ImageBox) {
+  target.save();
+  target.globalAlpha = 1;
+  target.setLineDash([10, 8]);
+  target.lineWidth = 3;
+  target.strokeStyle = '#3b82f6';
+  target.strokeRect(box.x, box.y, box.width, box.height);
+  target.setLineDash([]);
+
+  target.beginPath();
+  target.arc(box.x + box.width, box.y + box.height, IMAGE_HANDLE_VISUAL_RADIUS, 0, Math.PI * 2);
+  target.fillStyle = '#3b82f6';
+  target.fill();
+  target.lineWidth = 3;
+  target.strokeStyle = '#ffffff';
+  target.stroke();
+  target.restore();
 }
 
 function rainbowColor(hue: number) {
@@ -305,7 +545,9 @@ function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject,
 function renderObject(ctx: CanvasRenderingContext2D, object: DrawingObject, width: number, height: number) {
   if (object.type === 'stroke') drawStroke(ctx, object);
   else if (object.type === 'blur') applyBlur(ctx, object, width, height);
-  else drawStamp(ctx, object);
+  else if (object.type === 'stamp') drawStamp(ctx, object);
+  // 'image' objects are intentionally never rasterized into the cached
+  // layer surface — see the image-drawing loop in renderDocument below.
 }
 
 function renderLayer(ctx: CanvasRenderingContext2D, layer: DrawingLayer, width: number, height: number) {
@@ -340,17 +582,53 @@ export function renderDocument(
   // exportPng/サムネイル生成では渡されない(=document layersのみが描かれ、
   // ガイド線などdraft由来の要素は一切含まれない)。
   draftObjects?: DrawingObject[] | null,
+  imageSelection?: ImageSelection | null,
+  // pruneLayerCache/pruneImageCache key eviction on *this call's* document
+  // alone — correct for the live editor canvas (CanvasStage), whose calls
+  // always reflect the single document actually on screen, but wrong for a
+  // one-off render of some *other* document (documentStorage.ts's
+  // createThumbnail(), exportPng.ts): if that other document doesn't
+  // reference a src the live editor is still mid-decode on (e.g. a
+  // thumbnail regenerated for a different saved session while today's photo
+  // import is still decoding), pruning here would evict that src's decode
+  // cache entry — and the pending redraw callback registered for it — out
+  // from under the live editor, which then never repaints on its own.
+  // Callers rendering a document that isn't necessarily "the" live one pass
+  // `{ prune: false }` to opt out; the live editor's own calls (both here in
+  // CanvasStage's render effect) keep the default so normal eviction still
+  // happens on every real document mutation.
+  options?: { prune?: boolean },
 ) {
-  pruneLayerCache(document);
+  if (options?.prune !== false) {
+    pruneLayerCache(document);
+    pruneImageCache(document);
+  }
   target.clearRect(0, 0, document.width, document.height);
   drawTemplate(target, document.template, document.width, document.height);
 
   for (const layer of document.layers) {
     if (!layer.visible) continue;
-    const surface = renderedLayerSurface(layer, document.width, document.height);
     target.save();
     target.globalAlpha = Math.max(0.1, Math.min(1, layer.opacity ?? 1));
 
+    // Images draw fresh every frame, under this layer's other (rasterized)
+    // content — a stroke drawn in the same layer, e.g. tracing directly on
+    // top of an imported reference, should stay visible above it. This also
+    // means a selected image can be dragged/resized (imageSelection
+    // override) without re-rendering the layer's cached bitmap at all.
+    for (const object of layer.objects) {
+      if (object.type !== 'image') continue;
+      const box: ImageBox = imageSelection && imageSelection.id === object.id ? imageSelection : object;
+      // Forward `options` (in particular `prune`) to the follow-up redraw
+      // this schedules once a cold src finishes decoding — otherwise a
+      // { prune: false } caller (createThumbnail/exportPng) would still
+      // prune with the default (true) once its callback eventually fires,
+      // reintroducing the exact eviction race this option exists to avoid,
+      // just deferred until decode completes instead of immediately.
+      drawImageObject(target, object, box, () => renderDocument(target, document, draftObjects, imageSelection, options));
+    }
+
+    const surface = renderedLayerSurface(layer, document.width, document.height);
     if (draftObjects && draftObjects.length > 0 && layer.id === document.activeLayerId) {
       const preview = getDraftSurface(document.width, document.height);
       const previewCtx = preview.getContext('2d');
@@ -371,4 +649,6 @@ export function renderDocument(
     }
     target.restore();
   }
+
+  if (imageSelection) drawImageSelectionChrome(target, imageSelection);
 }

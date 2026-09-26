@@ -43,12 +43,36 @@ export type StampObject = {
   color: string;
 };
 
-export type DrawingObject = StrokeObject | BlurObject | StampObject;
+// A photo/reference picture imported into a layer to trace over. Unlike
+// strokes/stamps it is never rasterized into the layer's cached bitmap
+// (see engine/renderer.ts) so it can be repositioned/scaled after import
+// without re-rendering brush content. x/y is the top-left corner and
+// width/height the displayed size, all in canvas coordinate space (same
+// space as Point/StampObject) — independent of CanvasStage's viewport
+// zoom/pan, which only affects how that space is presented on screen.
+export type ImageObject = {
+  id: string;
+  type: 'image';
+  src: string; // downscaled data URL — see utils/importImage.ts
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
-export type ToolMode = 'brush' | 'stamp' | 'eyedropper';
+export type DrawingObject = StrokeObject | BlurObject | StampObject | ImageObject;
+
+export type ToolMode = 'brush' | 'stamp' | 'eyedropper' | 'image';
 
 export const STAMP_SIZE = 96;
 export const DEFAULT_BLUR_STRENGTH = 6;
+
+// On-canvas resize handle for a selected ImageObject (engine/renderer.ts
+// draws it, components/CanvasStage.tsx hit-tests against it). The hit
+// radius is larger than the visual one for touch-friendliness.
+export const IMAGE_HANDLE_VISUAL_RADIUS = 22;
+export const IMAGE_HANDLE_HIT_RADIUS = 34;
+export const IMAGE_MIN_SIZE = 40;
 
 export type DrawingLayer = {
   id: string;
@@ -57,6 +81,11 @@ export type DrawingLayer = {
   locked: boolean;
   opacity: number;
   objects: DrawingObject[];
+  // Marks the layer new photo imports land in (see
+  // useDrawingDocument#importDraftImage). Optional so older saved documents
+  // (no layer had this field) still load — they fall back to whichever
+  // layer is active at import time.
+  kind?: 'draft';
 };
 
 export type DrawingDocument = {
@@ -110,9 +139,41 @@ export function createInitialDocument(template: TemplateKind, orientation: Orien
     template,
     activeLayerId: lineId,
     layers: [
-      { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [] },
+      { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [], kind: 'draft' },
       { id: colorId, name: 'いろぬり', visible: true, locked: false, opacity: 1, objects: [] },
       { id: lineId, name: 'せんが', visible: true, locked: false, opacity: 1, objects: [] },
     ],
+  };
+}
+
+// Documents saved before the draft-image-import feature landed have no
+// layer carrying kind:'draft' at all (the field didn't exist yet), so a
+// naive `layers.find(l => l.kind === 'draft')` fails for every one of them.
+// Layer names are fixed at creation (createInitialDocument only, no rename
+// UI — see components/LayerPanel.tsx) and never change afterward, so
+// matching the したがき name is a reliable signal even after the user has
+// reordered layers (moveActiveLayer swaps array positions) or deleted
+// others.
+//
+// If that named layer itself was deleted (the user can delete any layer
+// down to the last one), we deliberately do NOT tag any other layer as the
+// draft — the bottom remaining layer could be genuine artwork the user
+// drew, and tagging it kind:'draft' would let a later photo import's
+// opacity/visibility/clear/delete controls corrupt that artwork, the exact
+// class of bug this migration exists to prevent, just from a different
+// angle. Leaving the marker absent is safe: importDraftImage already falls
+// back to whichever layer is active at import time when it finds no
+// kind:'draft' layer, so the photo still lands somewhere sensible without
+// silently annexing an unrelated layer as if it were the draft layer.
+// Called at every restore/resume so it applies regardless of when the
+// document was originally saved; a no-op once a layer already carries
+// kind: 'draft' (including brand-new documents).
+export function ensureDraftLayer(document: DrawingDocument): DrawingDocument {
+  if (document.layers.some((layer) => layer.kind === 'draft')) return document;
+  const target = document.layers.find((layer) => layer.name === 'したがき');
+  if (!target) return document;
+  return {
+    ...document,
+    layers: document.layers.map((layer) => (layer.id === target.id ? { ...layer, kind: 'draft' as const } : layer)),
   };
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ChangeEvent } from 'react';
 import type { BrushKind, StampKind, ToolSettings } from '../domain/drawing';
 
 const brushes: Array<{ key: BrushKind; icon: string; label: string }> = [
@@ -33,15 +34,54 @@ type Props = {
   onReturnToStart: () => void;
   onSaveDraft: () => void;
   onExportPng: () => void;
+  onImportImage: (file: File) => void;
+  hasDraftImage: boolean;
   saveState: SaveState;
 };
 
-export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, saveState }: Props) {
+export function Toolbar({
+  settings,
+  setSettings,
+  mirrorEnabled,
+  onToggleMirror,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  onReturnToStart,
+  onSaveDraft,
+  onExportPng,
+  onImportImage,
+  hasDraftImage,
+  saveState,
+}: Props) {
   const toolbarRef = useRef<HTMLElement>(null);
   const stampMenuRef = useRef<HTMLDetailsElement>(null);
   const stampPopoverRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const [stampPopoverPosition, setStampPopoverPosition] = useState({ top: 76, left: VIEWPORT_MARGIN });
   const setBrush = (brush: BrushKind) => setSettings({ ...settings, mode: 'brush', brush });
+  const handleImageInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // allow re-selecting the same file next time
+    if (file) onImportImage(file);
+  };
+  // Once a photo already exists on the draft layer, choosing any other tool
+  // (a pen, a stamp, ...) moves settings.mode away from 'image' — after
+  // that, without this branch, the only control this button had was "open
+  // the file picker", so the already-imported photo could never be
+  // reselected/moved/resized again short of importing a brand new one. When
+  // one already exists, tapping the button instead just re-enters image
+  // mode; opening the picker to import an *additional* photo is still one
+  // tap away by tapping it again once already in that mode.
+  const canReactivateImageMode = hasDraftImage && settings.mode !== 'image';
+  const handleImageButtonClick = () => {
+    if (canReactivateImageMode) {
+      setSettings({ ...settings, mode: 'image' });
+      return;
+    }
+    imageInputRef.current?.click();
+  };
   const setStamp = (stampKind: StampKind) => {
     setSettings({ ...settings, mode: 'stamp', stampKind });
     if (stampMenuRef.current) stampMenuRef.current.open = false;
@@ -112,6 +152,25 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
           </div>
         </details>
 
+        <button
+          type="button"
+          className={settings.mode === 'image' ? 'compact-tool active' : 'compact-tool'}
+          onClick={handleImageButtonClick}
+          title={canReactivateImageMode ? 'しゃしんをうごかす' : 'しゃしんをとりこむ'}
+          aria-label={canReactivateImageMode ? 'したがきのしゃしんをうごかす' : 'したがきに しゃしんをとりこむ'}
+        >
+          <span className="compact-tool-icon" aria-hidden="true">🖼️</span>
+          <span className="compact-tool-label">しゃしん</span>
+        </button>
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleImageInputChange}
+          style={{ display: 'none' }}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
         <button
           type="button"
           className={mirrorEnabled ? 'compact-tool active' : 'compact-tool'}

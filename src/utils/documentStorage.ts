@@ -1,5 +1,5 @@
 import type { ToolSettings } from '../domain/drawing';
-import { renderDocument } from '../engine/renderer';
+import { preloadDocumentImages, renderDocument } from '../engine/renderer';
 import type { DrawingHistory } from '../state/useDrawingDocument';
 
 const DB_NAME = 'kids-oekaki';
@@ -7,7 +7,24 @@ const DB_VERSION = 1;
 const STORE_NAME = 'drawing-sessions';
 const LEGACY_CURRENT_KEY = 'current';
 const DRAFT_PREFIX = 'draft:';
-const SCHEMA_VERSION = 2;
+// v2: pre-draft-image-import format (every DrawingObject is a
+// stroke/blur/stamp). v3: adds the ImageObject variant (domain/drawing.ts)
+// for imported photos. A v2 document is always a valid v3 document (it can
+// never contain an image object), so it's safe to read-and-upgrade in place.
+// A v3 document is NOT safe for a client that only knows v2: that client's
+// object-rendering switch has no 'image' case, so it would silently treat an
+// ImageObject as an unrecognized stamp and the photo would vanish from the
+// canvas/exports while the user keeps editing and autosaving over it (Codex
+// review finding on PR #11, reviewed commit c43ce60a45). Bumping
+// SCHEMA_VERSION means a v2-only build's own (unchanged) strict `!==` guard
+// below now rejects a v3 document outright — "この保存データは新しい形式です"
+// — instead of misreading it.
+const SCHEMA_VERSION = 3;
+// Oldest schemaVersion this build still reads (and upgrades on load). Only
+// v2 predates this build; anything older already got folded into v2 by
+// migrateLegacyCurrent() below before it could reach the versioned
+// draft:-prefixed records this constant guards.
+const MIN_READABLE_SCHEMA_VERSION = 2;
 const THUMBNAIL_MAX_WIDTH = 180;
 const THUMBNAIL_MAX_HEIGHT = 128;
 
@@ -45,6 +62,21 @@ function validateHistory(history: DrawingHistory | undefined) {
   }
 }
 
+// Rejects anything this build doesn't know how to read (older than
+// MIN_READABLE_SCHEMA_VERSION, or newer than SCHEMA_VERSION — e.g. saved by
+// a build with a feature this one predates) rather than silently
+// misinterpreting its DrawingObject variants, and upgrades an older-but-
+// readable document's version label in place. Every readable older version
+// so far (currently just v2) is a strict structural subset of the current
+// one, so no field-level migration is needed beyond relabeling.
+function upgradeSchemaVersion(value: StoredDrawingSession): StoredDrawingSession {
+  if (value.schemaVersion === SCHEMA_VERSION) return value;
+  if (value.schemaVersion >= MIN_READABLE_SCHEMA_VERSION && value.schemaVersion < SCHEMA_VERSION) {
+    return { ...value, schemaVersion: SCHEMA_VERSION };
+  }
+  throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
+}
+
 function defaultName(history: DrawingHistory, savedAt: string) {
   const template = history.present.template === '4koma' ? '4コマ' : history.present.template === 'diary' ? 'えにっき' : 'まっしろ';
   const date = new Date(savedAt);
@@ -70,7 +102,13 @@ function createThumbnail(history: DrawingHistory): string | undefined {
   source.height = drawing.height;
   const sourceCtx = source.getContext('2d');
   if (!sourceCtx) return undefined;
-  renderDocument(sourceCtx, drawing);
+  // { prune: false }: this renders `drawing` (one saved session's document),
+  // which is not necessarily the document currently live in the editor (see
+  // listDrawingSessions()'s thumbnail-backfill loop, which can run this for
+  // *other* sessions). Pruning renderer.ts's shared decode cache against
+  // this document alone could evict a src the live editor is still
+  // mid-decode on. See renderDocument's own comment on `options.prune`.
+  renderDocument(sourceCtx, drawing, null, null, { prune: false });
 
   const preview = document.createElement('canvas');
   preview.width = width;
@@ -79,6 +117,28 @@ function createThumbnail(history: DrawingHistory): string | undefined {
   if (!previewCtx) return undefined;
   previewCtx.drawImage(source, 0, 0, width, height);
   return preview.toDataURL('image/webp', 0.72);
+}
+
+// createThumbnail() renders synchronously: if a draft-layer photo hasn't
+// finished decoding yet, renderer.ts's drawImageObject skips it for *this*
+// call and only schedules a redraw once decoding completes — but that
+// redraw targets the canvas createThumbnail() already discarded after
+// calling toDataURL() on it, so the photo would be silently missing from
+// the persisted thumbnail forever (the live editor canvas is unaffected;
+// it has its own redraw target — see engine/renderer.ts's per-target
+// pendingRedraws). Awaiting preloadDocumentImages() first — the same guard
+// utils/exportPng.ts already uses before its own renderDocument() call —
+// guarantees every image is decoded before createThumbnail() rasterizes.
+// Kept as a separate wrapper (rather than making createThumbnail itself
+// async) because migrateLegacyCurrent() below calls the sync version from
+// inside a live IndexedDB transaction, where awaiting anything before the
+// next store request would let the transaction auto-close; that call site
+// is safe to leave synchronous since schemaVersion-2-without-kind legacy
+// documents predate the image-import feature and can never contain an
+// image object.
+async function createThumbnailAsync(history: DrawingHistory): Promise<string | undefined> {
+  await preloadDocumentImages(history.present);
+  return createThumbnail(history);
 }
 
 async function readValue<T>(db: IDBDatabase, key: IDBValidKey): Promise<T | undefined> {
@@ -169,7 +229,7 @@ export async function saveDrawingSession(
       savedAt,
       history,
       settings,
-      thumbnail: createThumbnail(history),
+      thumbnail: await createThumbnailAsync(history),
     };
     await putValue(db, `${DRAFT_PREFIX}${id}`, session);
     return session;
@@ -213,20 +273,20 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
       transaction.onerror = () => reject(transaction.error ?? new Error('保存した作品を読めませんでした'));
     });
 
-    return entries
-      .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
-      .map(({ value }) => {
-        validateHistory(value.history);
-        if (value.schemaVersion !== SCHEMA_VERSION) {
-          throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
-        }
-        return {
-          ...value,
-          name: normalizeName(value.name, value.history, value.savedAt),
-          thumbnail: value.thumbnail ?? createThumbnail(value.history),
-        };
-      })
-      .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+    const sessions = await Promise.all(
+      entries
+        .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
+        .map(async ({ value: rawValue }) => {
+          const value = upgradeSchemaVersion(rawValue);
+          validateHistory(value.history);
+          return {
+            ...value,
+            name: normalizeName(value.name, value.history, value.savedAt),
+            thumbnail: value.thumbnail ?? await createThumbnailAsync(value.history),
+          };
+        }),
+    );
+    return sessions.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
   } finally {
     db.close();
   }
@@ -235,16 +295,14 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
 export async function loadDrawingSession(id: string): Promise<StoredDrawingSession | null> {
   const db = await openDb();
   try {
-    const value = await readValue<StoredDrawingSession>(db, `${DRAFT_PREFIX}${id}`);
-    if (!value) return null;
-    if (value.schemaVersion !== SCHEMA_VERSION) {
-      throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
-    }
+    const rawValue = await readValue<StoredDrawingSession>(db, `${DRAFT_PREFIX}${id}`);
+    if (!rawValue) return null;
+    const value = upgradeSchemaVersion(rawValue);
     validateHistory(value.history);
     return {
       ...value,
       name: normalizeName(value.name, value.history, value.savedAt),
-      thumbnail: value.thumbnail ?? createThumbnail(value.history),
+      thumbnail: value.thumbnail ?? await createThumbnailAsync(value.history),
     };
   } finally {
     db.close();
