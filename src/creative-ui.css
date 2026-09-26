@@ -26,8 +26,24 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  flex: 0 0 auto;
 }
+
+/* primary-toolsは道具の数が増えるほど幅を必要とするが、もどる/戻す/
+   やり直す/保存/PNGといった.creative-actions側は常に画面内で押せる
+   ことを優先する。primary-toolsだけをmin-width:0で縮小可能にしshrink分は
+   横スクロールで補うことで、道具が増えてもcreative-actionsが画面外へ
+   押し出されてクリップされる(=保存・PNGが押せなくなる)ことがないように
+   する(Codexレビュー指摘: 鉛筆・筆追加でツールバー全体が収まらない幅が
+   拡大した)。 */
+.primary-tools {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.primary-tools::-webkit-scrollbar { display: none; }
+
+.creative-actions { flex: 0 0 auto; }
 
 .compact-tool {
   min-width: 52px;

@@ -345,6 +345,9 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       color: settings.color,
       size: settings.size,
       points: [point],
+      // ミラー描画時、反転strokeはmirrorStrokeAcrossAxisで別idを持つが
+      // seedはそのまま引き継ぐため、鉛筆・筆のかすれ・抑揚が左右対称になる。
+      seed: crypto.randomUUID(),
     };
 
     if (canUseLiveStroke(stroke)) {

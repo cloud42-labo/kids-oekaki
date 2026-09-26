@@ -162,7 +162,7 @@ function drawPencilStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
     const a = stroke.points[i];
     const b = stroke.points[i + 1];
     const pressure = (a.pressure + b.pressure) / 2;
-    const jitter = seededJitter(stroke.id, i);
+    const jitter = seededJitter(stroke.seed ?? stroke.id, i);
     ctx.globalAlpha = Math.max(0.35, Math.min(0.9, 0.55 + pressure * 0.3 + jitter * 0.12));
     ctx.lineWidth = Math.max(0.6, baseWidth * (0.75 + pressure * 0.25) + jitter * baseWidth * 0.15);
     ctx.beginPath();
@@ -429,6 +429,29 @@ function pruneLayerCache(document: DrawingDocument) {
   }
 }
 
+// 鉛筆・筆はセグメントごとに太さ・濃さを変えるため、1本のstrokeを
+// beginPath/stroke呼び出し複数回に分けて描く(通常のpen/markerは
+// 1回のstroke呼び出しで済む)。ドラッグ中のライブpreviewは指の動きの
+// たびにrenderDocumentが呼ばれ、そのたびに毎回蓄積済みの全pointsを
+// 再生するため、ストロークが伸びるほど毎フレームの描画コストが増え続け
+// (低スペックAndroid端末で顕著)、低スペックAndroid端末でのペン入力の
+// もたつきにつながる(Codexレビュー指摘)。previewの間だけ、鉛筆・筆の
+// 対象pointsを直近の点数へ絞る。commit時(onCommitStroke)には常に完全な
+// pointsを使うため、保存・エクスポートされる最終結果はこのトリミングの
+// 影響を受けない。
+const MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS = 48;
+
+function previewSafeDraftObject(object: DrawingObject): DrawingObject {
+  if (
+    object.type === 'stroke'
+    && (object.brush === 'pencil' || object.brush === 'brush')
+    && object.points.length > MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS
+  ) {
+    return { ...object, points: object.points.slice(-MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS) };
+  }
+  return object;
+}
+
 export function renderDocument(
   target: CanvasRenderingContext2D,
   document: DrawingDocument,
@@ -460,7 +483,7 @@ export function renderDocument(
       previewCtx.globalAlpha = 1;
       previewCtx.drawImage(surface, 0, 0);
       for (const draftObject of draftObjects) {
-        renderObject(previewCtx, draftObject, document.width, document.height);
+        renderObject(previewCtx, previewSafeDraftObject(draftObject), document.width, document.height);
       }
       target.drawImage(preview, 0, 0);
     } else {
