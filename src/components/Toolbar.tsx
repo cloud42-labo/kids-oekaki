@@ -33,10 +33,11 @@ type Props = {
   onReturnToStart: () => void;
   onSaveDraft: () => void;
   onExportPng: () => void;
+  isExportingPng: boolean;
   saveState: SaveState;
 };
 
-export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, saveState }: Props) {
+export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, isExportingPng, saveState }: Props) {
   const toolbarRef = useRef<HTMLElement>(null);
   const stampMenuRef = useRef<HTMLDetailsElement>(null);
   const stampPopoverRef = useRef<HTMLDivElement>(null);
@@ -142,7 +143,9 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
         <button className="icon-action" disabled={!canUndo} onClick={onUndo} aria-label="ひとつ戻る" title="戻る">↶</button>
         <button className="icon-action" disabled={!canRedo} onClick={onRedo} aria-label="やり直す" title="やり直す">↷</button>
         <button className="text-action primary" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
-        <button className="text-action" onClick={onExportPng}>⇩ <span>PNG</span></button>
+        <button className="text-action" onClick={onExportPng} disabled={isExportingPng} aria-busy={isExportingPng}>
+          {isExportingPng ? '⏳' : '⇩'} <span>{isExportingPng ? '保存中…' : 'PNG'}</span>
+        </button>
       </div>
     </header>
   );
