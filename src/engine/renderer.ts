@@ -188,10 +188,95 @@ function drawBlurMask(ctx: CanvasRenderingContext2D, blur: BlurObject, offsetX: 
   ctx.restore();
 }
 
-// ぼかしは「色を重ねる」のではなく、操作時点までの同一レイヤー画素を
-// 局所領域だけblurしたコピーに置き換える。effect自体をDocumentへ保持するため、
-// 通常表示・Undo/Redo・途中保存・PNG exportで同じ順序を決定論的に再生できる。
-function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
+// 1次元の箱型フィルタ(box blur)。累積和で境界をclampしながら
+// [i-radius, i+radius]の合計を返す(O(length))。
+function boxSum1D(values: Float32Array, length: number, radius: number): Float32Array {
+  const prefix = new Float32Array(length + 1);
+  for (let i = 0; i < length; i += 1) prefix[i + 1] = prefix[i] + values[i];
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i += 1) {
+    const start = Math.max(0, i - radius);
+    const end = Math.min(length - 1, i + radius);
+    out[i] = prefix[end + 1] - prefix[start];
+  }
+  return out;
+}
+
+function boxBlur2D(src: Float32Array, width: number, height: number, radius: number): Float32Array {
+  const horizontal = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    const offset = y * width;
+    const row = boxSum1D(src.subarray(offset, offset + width), width, radius);
+    horizontal.set(row, offset);
+  }
+  const result = new Float32Array(width * height);
+  const column = new Float32Array(height);
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) column[y] = horizontal[y * width + x];
+    const summed = boxSum1D(column, height, radius);
+    for (let y = 0; y < height; y += 1) result[y * width + x] = summed[y];
+  }
+  return result;
+}
+
+// 近傍の不透明画素だけを対象にした色の重み付き平均(=alphaで重み付けした
+// box blur)を計算する。透明画素はweight 0として扱われるため、境界の
+// 「何も無い場所」の色(≒台紙の白)を混ぜ込むことがない。
+// alpha(不透明度)は、既存の不透明画素では絶対に下げない
+// (max(元のalpha, 近傍alphaの単純平均))。指でこすって隣の色を
+// 引きずり込むスマッジ本来の動きとして、境界のすぐ隣の透明画素へ
+// alphaが少しだけ広がることは許容するが、それは常に周囲の実際の絵の具の
+// 色で埋まるのであって、透明=白として混ぜ込まれるのではない。
+function smudgeColors(imageData: ImageData, radius: number) {
+  const { data, width, height } = imageData;
+  const n = width * height;
+  const weightedR = new Float32Array(n);
+  const weightedG = new Float32Array(n);
+  const weightedB = new Float32Array(n);
+  const alphaFrac = new Float32Array(n);
+  const ones = new Float32Array(n).fill(1);
+  for (let i = 0; i < n; i += 1) {
+    const o = i * 4;
+    const a = data[o + 3] / 255;
+    weightedR[i] = data[o] * a;
+    weightedG[i] = data[o + 1] * a;
+    weightedB[i] = data[o + 2] * a;
+    alphaFrac[i] = a;
+  }
+
+  const sumR = boxBlur2D(weightedR, width, height, radius);
+  const sumG = boxBlur2D(weightedG, width, height, radius);
+  const sumB = boxBlur2D(weightedB, width, height, radius);
+  const sumAlpha = boxBlur2D(alphaFrac, width, height, radius);
+  const windowCount = boxBlur2D(ones, width, height, radius);
+
+  const mixedR = new Uint8ClampedArray(n);
+  const mixedG = new Uint8ClampedArray(n);
+  const mixedB = new Uint8ClampedArray(n);
+  const mixedAlpha = new Uint8ClampedArray(n);
+  for (let i = 0; i < n; i += 1) {
+    if (sumAlpha[i] > 0.0001) {
+      mixedR[i] = sumR[i] / sumAlpha[i];
+      mixedG[i] = sumG[i] / sumAlpha[i];
+      mixedB[i] = sumB[i] / sumAlpha[i];
+    } else {
+      const o = i * 4;
+      mixedR[i] = data[o];
+      mixedG[i] = data[o + 1];
+      mixedB[i] = data[o + 2];
+    }
+    const averageAlpha = windowCount[i] > 0 ? sumAlpha[i] / windowCount[i] : 0;
+    mixedAlpha[i] = Math.max(alphaFrac[i], averageAlpha) * 255;
+  }
+  return { mixedR, mixedG, mixedB, mixedAlpha };
+}
+
+// このPR(OEK-05-S04-BUG03)より前に保存されたBlurObjectには algorithm
+// フィールドが無い。それらは以前と全く同じ見た目で読み込み・再エクスポート
+// できるよう、旧Gaussian blur実装をそのまま残して使い続ける
+// (Codexレビュー指摘: 新アルゴリズムへ暗黙に差し替えると既存作品の
+// 見た目とサムネイルが無断で変わってしまう)。
+function applyBlurGaussianLegacy(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
   if (!blur.points.length) return;
   const strength = Math.max(1, Math.min(20, blur.strength));
   const margin = blur.size / 2 + strength * 3 + 2;
@@ -248,6 +333,63 @@ function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth:
   ctx.restore();
 }
 
+// ぼかしは「透明度を薄めて台紙を透かす」のではなく、指でこすって隣接色
+// 同士を混ぜる「スマッジ」として実装する。同一レイヤーの画素だけを対象に
+// (他レイヤー・台紙はrenderLayerの時点で分離済み)、不透明画素の色だけを
+// alpha加重平均で混ぜ、各画素自身のalpha(不透明度)は変えない。そのため
+// 赤と青の境界をなぞると中間色(紫)が生まれる一方、透明領域や白い台紙が
+// 色として混ぜ込まれたり、境界が白っぽく薄まったりすることがない。
+// effect自体をDocumentへ保持するため、通常表示・Undo/Redo・途中保存・
+// PNG exportで同じ結果を決定論的に再生できる。
+function applyBlurSmudge(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
+  if (!blur.points.length) return;
+  const strength = Math.max(1, Math.min(20, blur.strength));
+  const margin = blur.size / 2 + strength * 3 + 2;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of blur.points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  const sx = Math.max(0, Math.floor(minX - margin));
+  const sy = Math.max(0, Math.floor(minY - margin));
+  const ex = Math.min(canvasWidth, Math.ceil(maxX + margin));
+  const ey = Math.min(canvasHeight, Math.ceil(maxY + margin));
+  const width = Math.max(1, ex - sx);
+  const height = Math.max(1, ey - sy);
+
+  const mask = getBlurMaskSurface(width, height);
+  const maskCtx = mask.getContext('2d');
+  if (!maskCtx) return;
+  maskCtx.clearRect(0, 0, width, height);
+  drawBlurMask(maskCtx, blur, sx, sy);
+  const maskData = maskCtx.getImageData(0, 0, width, height).data;
+
+  const region = ctx.getImageData(sx, sy, width, height);
+  const { mixedR, mixedG, mixedB, mixedAlpha } = smudgeColors(region, strength);
+
+  const out = region.data;
+  const pixelCount = width * height;
+  for (let i = 0; i < pixelCount; i += 1) {
+    const maskAlpha = maskData[i * 4 + 3] / 255;
+    if (maskAlpha <= 0) continue;
+    const o = i * 4;
+    out[o] = out[o] + (mixedR[i] - out[o]) * maskAlpha;
+    out[o + 1] = out[o + 1] + (mixedG[i] - out[o + 1]) * maskAlpha;
+    out[o + 2] = out[o + 2] + (mixedB[i] - out[o + 2]) * maskAlpha;
+    // alphaはmixedAlpha(=max(元のalpha, 近傍alphaの平均))へ寄せる。
+    // 既存の不透明画素のalphaが下がることはなく、境界のすぐ隣の透明
+    // 画素にだけ周囲の絵の具のalphaがにじむ。
+    out[o + 3] = out[o + 3] + (mixedAlpha[i] - out[o + 3]) * maskAlpha;
+  }
+  ctx.putImageData(region, sx, sy);
+}
+
 function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject, { type: 'stamp' }>) {
   ctx.save();
   ctx.translate(object.x, object.y);
@@ -302,6 +444,11 @@ function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject,
   ctx.restore();
 }
 
+function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
+  if (blur.algorithm === 'smudge') applyBlurSmudge(ctx, blur, canvasWidth, canvasHeight);
+  else applyBlurGaussianLegacy(ctx, blur, canvasWidth, canvasHeight);
+}
+
 function renderObject(ctx: CanvasRenderingContext2D, object: DrawingObject, width: number, height: number) {
   if (object.type === 'stroke') drawStroke(ctx, object);
   else if (object.type === 'blur') applyBlur(ctx, object, width, height);
@@ -330,6 +477,21 @@ function pruneLayerCache(document: DrawingDocument) {
   for (const layerId of layerSurfaces.keys()) {
     if (!liveIds.has(layerId)) layerSurfaces.delete(layerId);
   }
+}
+
+// ドラッグ中のライブpreviewは指の動きのたびにrenderDocumentが呼ばれ、
+// そのたびに毎回previewCtxをまっさら(committed surfaceのコピー)から
+// draftObjectsを再生する。ぼかし(スマッジ)はO(領域サイズ)のJS convolution
+// であり、ネイティブのcanvas filterと違ってGPU合成されないため、ストローク
+// が伸びるほど領域が育ち続けると指を動かすたびに際限なく重くなる
+// (Codexレビュー指摘)。previewの間だけ、直近の点に絞った小さな領域で
+// 計算する。commit時(onCommitBlur)には常に完全なpointsを使うため、
+// 最終的な見た目・保存結果はこのトリミングの影響を受けない。
+const MAX_LIVE_BLUR_PREVIEW_POINTS = 48;
+
+function previewSafeDraftObject(object: DrawingObject): DrawingObject {
+  if (object.type !== 'blur' || object.points.length <= MAX_LIVE_BLUR_PREVIEW_POINTS) return object;
+  return { ...object, points: object.points.slice(-MAX_LIVE_BLUR_PREVIEW_POINTS) };
 }
 
 export function renderDocument(
@@ -363,7 +525,7 @@ export function renderDocument(
       previewCtx.globalAlpha = 1;
       previewCtx.drawImage(surface, 0, 0);
       for (const draftObject of draftObjects) {
-        renderObject(previewCtx, draftObject, document.width, document.height);
+        renderObject(previewCtx, previewSafeDraftObject(draftObject), document.width, document.height);
       }
       target.drawImage(preview, 0, 0);
     } else {
