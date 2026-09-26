@@ -36,7 +36,27 @@ button { -webkit-tap-highlight-color: transparent; }
 .orientation-swatch-landscape { width: 88px; height: 62px; }
 .back-link { margin-top: 20px; border: 0; background: transparent; color: #756b79; font-weight: 800; font-size: 16px; padding: 8px; }
 
-.app-shell { width: 100%; height: 100%; display: flex; flex-direction: column; background: #dce6ea; }
+/* Androidのedge-to-edge描画（targetSdk 35+で既定）では、WebViewがシステムバーの
+   裏側まで含めた画面全体で描画されるため、ツールバー（先頭子要素）が
+   ステータスバーの、ワークスペース下端がナビゲーションバーの裏に回り込む。
+   *{box-sizing:border-box}のため、paddingを足してもheight:100%の合計サイズは
+   変わらず、内側のコンテンツ領域だけが安全域ぶん狭まる（OEK-05-S03-BUG02）。
+   env()は非対応環境・PWA/デスクトップでは0pxを返すため、既存表示は変化しない。 */
+.app-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #dce6ea;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* 横持ちでsafe-area-inset-left/rightぶんのpaddingを引いた後の実効幅を
+     .creative-toolbarのcontainer queryから参照できるようにする
+     （Codexレビュー指摘 discussion_r4104352680 対応。詳細はcreative-ui.cssの
+     @container側コメント参照）。containmentはwidth:100%で明示済みのため
+     自身の外側レイアウトへの影響はない。 */
+  container-type: inline-size;
+}
 .toolbar { min-height: 92px; padding: 8px 10px; display: flex; align-items: center; gap: 10px; overflow-x: auto; background: #fff; box-shadow: 0 3px 14px rgba(38,32,45,.14); z-index: 5; }
 .tool-section { display: flex; align-items: center; gap: 7px; padding-right: 10px; border-right: 2px dashed #eadce6; flex: 0 0 auto; }
 .tool-buttons { gap: 6px; }
@@ -90,6 +110,49 @@ button { -webkit-tap-highlight-color: transparent; }
 
 @media (max-width: 600px) and (orientation: portrait) {
   /* min(150px, 42vw)にして、canvasがviewport幅いっぱいに近い極小画面でも
-     オーバーレイの左端がcanvas中央を越えないようにする（描画面を致命的に塞がないため）。 */
-  .layer-panel { position: absolute; right: 8px; bottom: 8px; width: min(150px, 42vw); max-height: 45%; border: 0; border-radius: 18px; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+     オーバーレイの左端がcanvas中央を越えないようにする（描画面を致命的に塞がないため）。
+
+     .layer-panelのposition:absoluteは、直近の位置指定祖先である.workspace
+     （creative-ui.cssの.creative-workspaceでposition:relativeが付与される、
+     .app-shellではない）のpadding boxを基準に解決される。.workspaceはpadding
+     を持たないため、.app-shellのpadding-bottom（safe-area-inset-bottom分）は
+     flexboxのサイズ計算を通じて.workspace自体の高さ・下端位置に既に反映済み
+     ——つまりbottom方向のinsetは.app-shellのpaddingで既に1回吸収されている。
+     ここでさらにenv(safe-area-inset-bottom)を加算すると二重適用になり、パネルが
+     必要以上に上へ浮く（OEK-05-S03-BUG02のCodexレビュー指摘）。bottomは8px固定でよい。
+
+     一方rightは.app-shell・.workspaceのどちらもinset-right分のpaddingを
+     持たないため、ここでのenv(safe-area-inset-right)加算が唯一の適用箇所であり
+     二重適用にならない。ジェスチャー/3ボタンいずれのナビゲーションバーでも右側の
+     ボタンが隠れないよう、実際のinset値を加算したままにする。
+     env()は非対応環境・PWA/デスクトップでは0pxを返すため、既存表示は変化しない。 */
+  .layer-panel {
+    position: absolute;
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: 8px;
+    width: min(150px, 42vw);
+    max-height: 45%;
+    border: 0;
+    border-radius: 18px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.2);
+  }
+}
+
+/* 横向き回転時、ナビゲーションバー（3ボタン/ジェスチャー）やディスプレイ
+   カットアウトがsafe-area-inset-left/rightを発生させることがある。この
+   media queryは縦持ち専用の上の対応とは独立で、bottom方向の分岐は無いため
+   二重適用の心配はない（Codexレビュー指摘、AGENTS.md L19: 実機での回転
+   チェックが必須）。
+   .app-shellへ左右paddingを加えると、workspace（ツールバー・レイヤー
+   パネル・color-dockを含む、いずれも.app-shellの子孫でflex/absoluteの
+   基準を.app-shell自身の外側dimensionsに依存しない）がinsetの内側へ
+   収まる。box-sizing:border-boxのため.app-shellの合計幅は変わらず、
+   内側のコンテンツ領域だけが安全域ぶん狭まる。
+   env()は非対応環境・PWA/デスクトップでは0pxを返すため、縦持ちや
+   insetの無い横持ちでの既存表示は変化しない。 */
+@media (orientation: landscape) {
+  .app-shell {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
 }
