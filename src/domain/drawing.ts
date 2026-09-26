@@ -23,12 +23,18 @@ export type StrokeObject = {
   points: Point[];
 };
 
+// algorithmは新規ストロークではCanvasStage側で必ず'smudge'を設定する。
+// このPRより前に保存されたDocumentのBlurObjectにはこのフィールドが無く、
+// undefinedのまま読み込まれる。undefinedは明示的に「旧Gaussian blur実装」
+// を指すものとして扱い、既存作品の見た目・再エクスポート結果を変えない
+// (renderer.tsのapplyBlur参照)。
 export type BlurObject = {
   id: string;
   type: 'blur';
   size: number;
   strength: number;
   points: Point[];
+  algorithm?: 'gaussian' | 'smudge';
 };
 
 export type StampKind = 'heart' | 'star' | 'speech' | 'focus';

@@ -8,6 +8,7 @@ type LayerCache = {
 
 const layerSurfaces = new Map<string, LayerCache>();
 let draftSurface: HTMLCanvasElement | null = null;
+let blurSurface: HTMLCanvasElement | null = null;
 let blurMaskSurface: HTMLCanvasElement | null = null;
 
 function getLayerSurface(layer: DrawingLayer, width: number, height: number) {
@@ -30,6 +31,13 @@ function getDraftSurface(width: number, height: number) {
   if (draftSurface.width !== width) draftSurface.width = width;
   if (draftSurface.height !== height) draftSurface.height = height;
   return draftSurface;
+}
+
+function getBlurSurface(width: number, height: number) {
+  if (!blurSurface) blurSurface = document.createElement('canvas');
+  if (blurSurface.width !== width) blurSurface.width = width;
+  if (blurSurface.height !== height) blurSurface.height = height;
+  return blurSurface;
 }
 
 function getBlurMaskSurface(width: number, height: number) {
@@ -263,6 +271,68 @@ function smudgeColors(imageData: ImageData, radius: number) {
   return { mixedR, mixedG, mixedB, mixedAlpha };
 }
 
+// このPR(OEK-05-S04-BUG03)より前に保存されたBlurObjectには algorithm
+// フィールドが無い。それらは以前と全く同じ見た目で読み込み・再エクスポート
+// できるよう、旧Gaussian blur実装をそのまま残して使い続ける
+// (Codexレビュー指摘: 新アルゴリズムへ暗黙に差し替えると既存作品の
+// 見た目とサムネイルが無断で変わってしまう)。
+function applyBlurGaussianLegacy(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
+  if (!blur.points.length) return;
+  const strength = Math.max(1, Math.min(20, blur.strength));
+  const margin = blur.size / 2 + strength * 3 + 2;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of blur.points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  const sx = Math.max(0, Math.floor(minX - margin));
+  const sy = Math.max(0, Math.floor(minY - margin));
+  const ex = Math.min(canvasWidth, Math.ceil(maxX + margin));
+  const ey = Math.min(canvasHeight, Math.ceil(maxY + margin));
+  const width = Math.max(1, ex - sx);
+  const height = Math.max(1, ey - sy);
+
+  const blurred = getBlurSurface(width, height);
+  const blurCtx = blurred.getContext('2d');
+  const mask = getBlurMaskSurface(width, height);
+  const maskCtx = mask.getContext('2d');
+  if (!blurCtx || !maskCtx) return;
+
+  blurCtx.save();
+  blurCtx.clearRect(0, 0, width, height);
+  blurCtx.globalAlpha = 1;
+  blurCtx.globalCompositeOperation = 'source-over';
+  blurCtx.filter = `blur(${strength}px)`;
+  blurCtx.drawImage(ctx.canvas, sx, sy, width, height, 0, 0, width, height);
+  blurCtx.filter = 'none';
+  blurCtx.restore();
+
+  maskCtx.clearRect(0, 0, width, height);
+  drawBlurMask(maskCtx, blur, sx, sy);
+
+  // ぼかしたコピーをブラシ形状だけ残す。
+  blurCtx.save();
+  blurCtx.globalCompositeOperation = 'destination-in';
+  blurCtx.globalAlpha = 1;
+  blurCtx.drawImage(mask, 0, 0);
+  blurCtx.restore();
+
+  // 元画素も同じマスクで消してから、ぼかした結果で置き換える。
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.drawImage(mask, sx, sy);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(blurred, sx, sy);
+  ctx.restore();
+}
+
 // ぼかしは「透明度を薄めて台紙を透かす」のではなく、指でこすって隣接色
 // 同士を混ぜる「スマッジ」として実装する。同一レイヤーの画素だけを対象に
 // (他レイヤー・台紙はrenderLayerの時点で分離済み)、不透明画素の色だけを
@@ -271,7 +341,7 @@ function smudgeColors(imageData: ImageData, radius: number) {
 // 色として混ぜ込まれたり、境界が白っぽく薄まったりすることがない。
 // effect自体をDocumentへ保持するため、通常表示・Undo/Redo・途中保存・
 // PNG exportで同じ結果を決定論的に再生できる。
-function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
+function applyBlurSmudge(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
   if (!blur.points.length) return;
   const strength = Math.max(1, Math.min(20, blur.strength));
   const margin = blur.size / 2 + strength * 3 + 2;
@@ -374,6 +444,11 @@ function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject,
   ctx.restore();
 }
 
+function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
+  if (blur.algorithm === 'smudge') applyBlurSmudge(ctx, blur, canvasWidth, canvasHeight);
+  else applyBlurGaussianLegacy(ctx, blur, canvasWidth, canvasHeight);
+}
+
 function renderObject(ctx: CanvasRenderingContext2D, object: DrawingObject, width: number, height: number) {
   if (object.type === 'stroke') drawStroke(ctx, object);
   else if (object.type === 'blur') applyBlur(ctx, object, width, height);
@@ -402,6 +477,21 @@ function pruneLayerCache(document: DrawingDocument) {
   for (const layerId of layerSurfaces.keys()) {
     if (!liveIds.has(layerId)) layerSurfaces.delete(layerId);
   }
+}
+
+// ドラッグ中のライブpreviewは指の動きのたびにrenderDocumentが呼ばれ、
+// そのたびに毎回previewCtxをまっさら(committed surfaceのコピー)から
+// draftObjectsを再生する。ぼかし(スマッジ)はO(領域サイズ)のJS convolution
+// であり、ネイティブのcanvas filterと違ってGPU合成されないため、ストローク
+// が伸びるほど領域が育ち続けると指を動かすたびに際限なく重くなる
+// (Codexレビュー指摘)。previewの間だけ、直近の点に絞った小さな領域で
+// 計算する。commit時(onCommitBlur)には常に完全なpointsを使うため、
+// 最終的な見た目・保存結果はこのトリミングの影響を受けない。
+const MAX_LIVE_BLUR_PREVIEW_POINTS = 48;
+
+function previewSafeDraftObject(object: DrawingObject): DrawingObject {
+  if (object.type !== 'blur' || object.points.length <= MAX_LIVE_BLUR_PREVIEW_POINTS) return object;
+  return { ...object, points: object.points.slice(-MAX_LIVE_BLUR_PREVIEW_POINTS) };
 }
 
 export function renderDocument(
@@ -435,7 +525,7 @@ export function renderDocument(
       previewCtx.globalAlpha = 1;
       previewCtx.drawImage(surface, 0, 0);
       for (const draftObject of draftObjects) {
-        renderObject(previewCtx, draftObject, document.width, document.height);
+        renderObject(previewCtx, previewSafeDraftObject(draftObject), document.width, document.height);
       }
       target.drawImage(preview, 0, 0);
     } else {
