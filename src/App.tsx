@@ -55,10 +55,27 @@ export default function App() {
   // captured in importImage's own closure) is required here because we need
   // the *latest* value at resolution time, not the value from when the
   // import began.
+  //
+  // The ref must not rely solely on this effect to stay current: React does
+  // not flush passive effects synchronously after `setActiveSessionId`, so a
+  // decode that resolves in the gap between that state update and this
+  // effect running would still read the stale ref value and pass the
+  // isStale() check. Every place that changes the active session therefore
+  // also writes `activeSessionIdRef.current` synchronously (see
+  // `setActiveSession` below); this effect remains only as a defensive
+  // backstop for updates that might bypass that helper.
   const activeSessionIdRef = useRef(activeSessionId);
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+  // Sets `activeSessionId` state while also updating the ref synchronously
+  // in the same call, so `importImage`'s stale check can never observe a
+  // window where the state has moved on but the ref still holds the
+  // previous session id.
+  const setActiveSession = (sessionId: string | null) => {
+    activeSessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
+  };
   // ミラー描画モードはdocument/settingsの一部ではなく、その場のUI操作の
   // 状態としてのみ扱う(保存データのschemaには影響しない)。新規作成・
   // 続きから、どちらでも既定はOFFに戻す。
@@ -121,7 +138,7 @@ export default function App() {
     setSettings(DEFAULT_SETTINGS);
     setSelectedImageId(null);
     setMirrorEnabled(false);
-    setActiveSessionId(crypto.randomUUID());
+    setActiveSession(crypto.randomUUID());
     setSaveState('idle');
     setStarted(true);
   };
@@ -133,7 +150,7 @@ export default function App() {
     setSettings(session.settings ?? DEFAULT_SETTINGS);
     setSelectedImageId(null);
     setMirrorEnabled(false);
-    setActiveSessionId(session.id);
+    setActiveSession(session.id);
     setSaveState('saved');
     setStarted(true);
     // Warm the decode cache so any draft-layer photo is ready to paint on
@@ -200,7 +217,7 @@ export default function App() {
     try {
       await deleteDrawingSession(sessionId);
       setSavedSessions((current) => current.filter((session) => session.id !== sessionId));
-      if (activeSessionId === sessionId) setActiveSessionId(null);
+      if (activeSessionId === sessionId) setActiveSession(null);
       setStorageError(undefined);
     } catch {
       setStorageError('作品を削除できませんでした。');

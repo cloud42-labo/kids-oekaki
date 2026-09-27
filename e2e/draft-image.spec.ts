@@ -1042,4 +1042,72 @@ test.describe('draft layer image import', () => {
     // offscreen render to skip the photo entirely for this save.
     expect(isCloseToRed({ r, g, b })).toBe(true);
   });
+
+  test('㉑ 取り込み中に「つづきから」で別の保存済み作品へ切り替えても、古い取り込みは反映されない', async ({ page }) => {
+    // Regression test for the P2 finding on commit ed3ddf8, extending test
+    // ⑮'s coverage (which only exercises the start() call site) to
+    // continueSaved() — the other place App.tsx's setActiveSession() helper
+    // (added for this finding) now keeps activeSessionIdRef synchronously
+    // current, alongside start() and deleteSaved().
+    //
+    // What this test does *not* prove, and why: Codex's finding describes a
+    // window between setActiveSessionId committing and the useEffect that
+    // used to sync activeSessionIdRef actually running. Investigating this
+    // app's actual React 19 (createRoot + StrictMode) runtime behavior found
+    // that React's reconciler drains any just-scheduled passive effect
+    // *synchronously* as part of the same microtask-driven update cycle that
+    // processes a discrete click — flushSyncWorkAcrossRoots_impl's do-while
+    // loop calls performSyncWorkOnRoot, whose very first line unconditionally
+    // calls flushPendingEffects(), and this is present in both
+    // react-dom-client.development.js and .production.js (not a
+    // StrictMode/dev-only artifact). That drain runs inside a native
+    // queueMicrotask, which the JS event loop guarantees finishes before any
+    // macrotask — and every realistic decode continuation (Image onload,
+    // FileReader, or even a setTimeout-based test delay) is macrotask-driven.
+    // This was confirmed empirically while writing this test: patching the
+    // scheduler package's underlying MessageChannel to artificially delay
+    // React's NormalPriority passive-effect flush by 600ms did not delay the
+    // observable ref sync at all — it still landed within ~60-130ms of the
+    // triggering click on *both* the pre-fix and fixed code, because that
+    // synchronous drain bypasses the delayed scheduling entirely. So the
+    // exact gap Codex describes could not be forced open in this codebase's
+    // current React version via any realistic or delayed-timer-based decode;
+    // a test built on installDelayedImageDecoding()'s wall-clock delay (as
+    // used below, and in tests ⑦/⑪/⑭/⑮/⑰/⑲/⑳) cannot fail pre-fix for this
+    // specific race, no matter how the delay is tuned, and claiming otherwise
+    // would be misleading. The fix itself is still correct and worth keeping
+    // regardless: it replaces a dependency on this internal, version-specific
+    // React draining behavior with an explicit synchronous guarantee that
+    // holds regardless of how React schedules passive effects in the future
+    // (e.g. under Suspense or a transition, where this same eager drain may
+    // not apply). This test instead verifies the ordinary (non-adversarial)
+    // case still holds for continueSaved(), matching test ⑮'s margin.
+    await installDelayedImageDecoding(page, 300);
+
+    // Session B: create, save, and give it a distinct name so it can be
+    // unambiguously targeted later (both sessions otherwise default to the
+    // same "まっしろ MM/DD HH:MM" name pattern).
+    await startBlankDrawing(page);
+    await page.getByRole('button', { name: '開始画面へ戻る' }).click();
+    await expect(page.locator('.saved-work-row')).toHaveCount(1);
+    page.once('dialog', (dialog) => void dialog.accept('セッションB'));
+    await page.locator('.saved-work-rename').click();
+    await expect(page.locator('.saved-work-row', { hasText: 'セッションB' })).toBeVisible();
+
+    // Session A: start fresh, begin a (slow) photo import, then leave for
+    // session B via continueSaved() well before the decode resolves.
+    await page.locator('.template-card', { hasText: 'まっしろ' }).click();
+    await page.getByRole('button', { name: /たて/ }).click();
+    await page.locator('input[type="file"]').setInputFiles(FIXTURE_PATH);
+    await page.getByRole('button', { name: '開始画面へ戻る' }).click();
+    await page.locator('.saved-work-row', { hasText: 'セッションB' }).locator('.saved-work-open').click();
+    await expect(page.locator('.stamp-menu')).toBeVisible();
+
+    // Give the delayed decode time to resolve.
+    await page.waitForTimeout(600);
+    await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
+
+    const draftRow = page.locator('.layer-row', { hasText: 'したがき' });
+    await expect(draftRow).not.toHaveClass(/active/);
+  });
 });
