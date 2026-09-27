@@ -62,3 +62,49 @@ test('PNG保存中は連打してもエクスポートは1回だけ実行され�
   await expect.poll(() => downloads.length).toBe(2);
   await expect(pngButton).toBeEnabled();
 });
+
+// OEK-05-S04-BUG01 Codexレビュー指摘: exportPng()の最初の一歩
+// (renderDocumentでcanvasへ描く処理)は同期実行であり、下書き画像や
+// 長いストロークが多い作品では体感できるほど時間がかかることがある。
+// setIsExportingPng(true)の直後にそのままexportPngへ入ると、Reactが
+// disabled/「保存中…」をDOMへ反映する前にその同期処理が始まってしまい、
+// 処理中表示が意味をなさない。上のテストは非同期のtoBlobだけを遅延させる
+// ため、この「同期区間そのものが長い」regressionを検出できない。
+// ここではrenderDocumentの内部で必ず呼ばれるCanvasRenderingContext2D.
+// clearRectをフックし、exportPng呼び出し直前に武装したうえで、その
+// clearRectが実際に呼ばれた瞬間(=同期描画処理が始まった瞬間)の
+// ボタンのdisabled状態をDOMから直接読み取って記録する。Reactの状態更新が
+// この時点までにDOMへcommitされていなければdisabled===falseのまま
+// 観測されるはずで、rAFで1描画フレーム分待ってからexportPngへ入る
+// fixが無いと必ず失敗する(実際に確認済み)。
+test('PNG保存中の同期描画処理が始まる前に、処理中表示がDOMへ反映されている', async ({ page }) => {
+  await page.addInitScript(() => {
+    const proto = CanvasRenderingContext2D.prototype;
+    const original = proto.clearRect;
+    let armed = false;
+    (window as unknown as { __armExportProbe: () => void }).__armExportProbe = () => { armed = true; };
+    (window as unknown as { __disabledAtBlockStart: boolean | null }).__disabledAtBlockStart = null;
+    proto.clearRect = function clearRectWithProbe(this: CanvasRenderingContext2D, ...args: Parameters<typeof original>) {
+      if (armed) {
+        armed = false;
+        const button = document.querySelector('.creative-actions .text-action:last-child') as HTMLButtonElement | null;
+        (window as unknown as { __disabledAtBlockStart: boolean | null }).__disabledAtBlockStart = button ? button.disabled : null;
+      }
+      return original.apply(this, args);
+    };
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /まっしろ/ }).click();
+  await page.getByRole('button', { name: /たて/ }).click();
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.evaluate(() => (window as unknown as { __armExportProbe: () => void }).__armExportProbe());
+  await page.getByRole('button', { name: /PNG/ }).click();
+  await downloadPromise;
+
+  const disabledAtBlockStart = await page.evaluate(
+    () => (window as unknown as { __disabledAtBlockStart: boolean | null }).__disabledAtBlockStart,
+  );
+  expect(disabledAtBlockStart).toBe(true);
+});
