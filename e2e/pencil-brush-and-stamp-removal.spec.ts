@@ -188,12 +188,13 @@ test.describe('鉛筆・筆ツールの追加とスタンプ作成UIの廃止', 
   });
 
   // Codexレビュー(PR #19)指摘: ライブpreview中の毎フレーム全segment再生は
-  // 低スペックAndroid端末で負荷になり得るため、preview中(ドラッグ中)だけ
-  // 鉛筆・筆の対象pointsを直近48点へ絞るようにした(renderer.tsの
-  // MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS)。commit(pointer-up)時は常に
-  // 完全なpointsを使うため、48点を大きく超える長いドラッグでも始点付近まで
-  // 含めて最終結果が正しく描画されることを確認する。
-  test('鉛筆で48点を超える長いドラッグをしても、始点付近まで含めて正しく描画される', async ({ page }) => {
+  // 低スペックAndroid端末で負荷になり得るため、preview中(ドラッグ中)は
+  // ジェスチャー単位のアキュムレーションcanvasへ差分区間だけを追記する
+  // (renderer.tsのrenderIncrementalTexturedStrokeDrafts)。commit
+  // (pointer-up)時は常に完全なpointsを使って1回だけ再計算するため、
+  // 長いドラッグでも始点付近まで含めて最終結果が正しく描画されることを
+  // 確認する。
+  test('鉛筆で長いドラッグをしても、始点付近まで含めて正しく描画される', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: /まっしろ/ }).click();
     await page.getByRole('button', { name: /たて/ }).click();
@@ -205,8 +206,7 @@ test.describe('鉛筆・筆ツールの追加とスタンプ作成UIの廃止', 
 
     await page.locator('.compact-size-control input[type="range"]').fill('30');
     await page.getByRole('button', { name: '鉛筆', exact: true }).click();
-    // 60ステップ=61点。MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS(48)を
-    // 超える1回の連続ドラッグにする。
+    // 60ステップ=61点の1回の連続ドラッグにする。
     await dragLine(page, box, 0.15, 0.85, 0.3, 60);
 
     const nearStart = await pixelAt(page, 0.17, 0.3);

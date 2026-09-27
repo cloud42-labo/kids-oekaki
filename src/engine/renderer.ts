@@ -138,7 +138,18 @@ function seededJitter(seed: string, index: number): number {
 // ストロークを短いセグメントへ分割し、筆圧とseed由来の揺らぎで
 // セグメントごとに太さ・濃さをわずかに変える(=紙に鉛筆の粒立ちが
 // あるように見える)。
-function drawPencilStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
+// fromSegment/toSegment(両端含む、セグメント番号=points[i]→points[i+1])を
+// 絞ることで、ストローク全体ではなく一部の区間だけを描ける。省略時は
+// 従来通り全区間(コミット・通常描画で使う経路)。鉛筆は各セグメントが
+// seed起因のjitterのみに依存し、他セグメントの内容や合計点数に左右
+// されないため、同じセグメントを何度描き直しても結果は変わらない
+// (ライブpreviewの差分更新で末尾セグメントを再描画しても無害)。
+function drawPencilStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: StrokeObject,
+  fromSegment = 0,
+  toSegment = stroke.points.length - 2,
+) {
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -149,6 +160,7 @@ function drawPencilStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
   const baseWidth = Math.max(1, stroke.size * 0.55);
 
   if (stroke.points.length === 1) {
+    if (fromSegment > 0) { ctx.restore(); return; }
     const p = stroke.points[0];
     ctx.globalAlpha = 0.7;
     ctx.beginPath();
@@ -158,7 +170,9 @@ function drawPencilStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
     return;
   }
 
-  for (let i = 0; i < stroke.points.length - 1; i += 1) {
+  const start = Math.max(0, fromSegment);
+  const end = Math.min(toSegment, stroke.points.length - 2);
+  for (let i = start; i <= end; i += 1) {
     const a = stroke.points[i];
     const b = stroke.points[i + 1];
     const pressure = (a.pressure + b.pressure) / 2;
@@ -175,7 +189,18 @@ function drawPencilStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
 
 // 筆: 一定の線幅ではなく、筆圧に加えてストロークの穂先(始点・終点)へ
 // 向けてだんだん細くなる抑揚をつける。単なる線幅違いのブラシと区別する。
-function drawBrushStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
+// fromSegment/toSegment(両端含む)を絞ることで一部の区間だけを描ける。
+// 省略時は従来通り全区間。筆はtaperFactorが「現在の総点数n」に依存する
+// ため、末尾付近のセグメントは総点数が増えるたびに見た目(width)が
+// 遡って変わり得る(TEXTURED_STROKE_RETOUCH_SEGMENTS参照)。既に
+// taperFactorが1に収束した(=どちらの端からも十分離れた)古いセグメントは
+// 再描画してもwidthが変わらないため、末尾付近だけを再描画すれば足りる。
+function drawBrushStroke(
+  ctx: CanvasRenderingContext2D,
+  stroke: StrokeObject,
+  fromSegment = 0,
+  toSegment = stroke.points.length - 2,
+) {
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -188,6 +213,7 @@ function drawBrushStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
   const baseWidth = Math.max(2, stroke.size);
 
   if (n === 1) {
+    if (fromSegment > 0) { ctx.restore(); return; }
     const p = stroke.points[0];
     const width = baseWidth * (0.35 + p.pressure * 0.65);
     ctx.beginPath();
@@ -199,7 +225,9 @@ function drawBrushStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
 
   const taperPoints = Math.min(6, Math.max(2, Math.floor(n / 4)));
   const lastSegment = n - 2;
-  for (let i = 0; i <= lastSegment; i += 1) {
+  const start = Math.max(0, fromSegment);
+  const end = Math.min(toSegment, lastSegment);
+  for (let i = start; i <= end; i += 1) {
     const a = stroke.points[i];
     const b = stroke.points[i + 1];
     const pressure = (a.pressure + b.pressure) / 2;
@@ -432,24 +460,83 @@ function pruneLayerCache(document: DrawingDocument) {
 // 鉛筆・筆はセグメントごとに太さ・濃さを変えるため、1本のstrokeを
 // beginPath/stroke呼び出し複数回に分けて描く(通常のpen/markerは
 // 1回のstroke呼び出しで済む)。ドラッグ中のライブpreviewは指の動きの
-// たびにrenderDocumentが呼ばれ、そのたびに毎回蓄積済みの全pointsを
-// 再生するため、ストロークが伸びるほど毎フレームの描画コストが増え続け
-// (低スペックAndroid端末で顕著)、低スペックAndroid端末でのペン入力の
-// もたつきにつながる(Codexレビュー指摘)。previewの間だけ、鉛筆・筆の
-// 対象pointsを直近の点数へ絞る。commit時(onCommitStroke)には常に完全な
-// pointsを使うため、保存・エクスポートされる最終結果はこのトリミングの
-// 影響を受けない。
-const MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS = 48;
+// たびにrenderDocumentが呼ばれる。以前は毎フレーム蓄積済みの全pointsを
+// (直近の点数へ絞った上で)再生していたが、これは2つの問題を残した
+// (Codexレビュー収束再レビュー指摘、renderer.tsのrenderIncrementalBlurDraft
+// と同種の問題):
+//   (a) 絞りは点の"個数"だけなので、トリミング窓に収まる間は依然として
+//       毎フレーム最大48セグメント分を再描画しており、ストロークが伸びる
+//       ほど処理コストが増え続けた。
+//   (b) 毎フレームpreviewをcommitted surfaceへ丸ごとリセットしてから
+//       トリミング後の点だけを再生するため、48点を超えた瞬間に始点側の
+//       線が消えて見える(ちらつき)。
+// ジェスチャー(1回のpointerdown〜pointerup)単位で永続するアキュムレー
+// ションcanvas(texturedStrokeGestureCanvas)を持ち、フレームごとに
+// 「前回までに描画済みのセグメント」から「今回までのセグメント」の
+// 差分区間だけを追記する。筆はtaperFactorが現在の総点数に依存し末尾の
+// 見た目が遡って変わり得るため、末尾付近(TEXTURED_STROKE_RETOUCH_
+// SEGMENTS分)は毎フレーム描き直す。鉛筆はセグメントが互いに独立なので
+// この再描画は無害。commit時(onCommitStroke)は常にこのpreview経路を
+// 経由せず、layerSurfacesのキャッシュ無効化から完全なpointsで1回だけ
+// 再計算されるため、このインクリメンタル処理は最終的な見た目・保存結果
+// に影響しない。
+const TEXTURED_STROKE_RETOUCH_SEGMENTS = 6;
 
-function previewSafeDraftObject(object: DrawingObject): DrawingObject {
-  if (
-    object.type === 'stroke'
-    && (object.brush === 'pencil' || object.brush === 'brush')
-    && object.points.length > MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS
-  ) {
-    return { ...object, points: object.points.slice(-MAX_LIVE_TEXTURED_STROKE_PREVIEW_POINTS) };
+function isTexturedStrokeDraft(object: DrawingObject): object is StrokeObject {
+  return object.type === 'stroke' && (object.brush === 'pencil' || object.brush === 'brush');
+}
+
+let texturedStrokeGestureCanvas: HTMLCanvasElement | null = null;
+function getTexturedStrokeGestureCanvas(width: number, height: number) {
+  if (!texturedStrokeGestureCanvas) texturedStrokeGestureCanvas = document.createElement('canvas');
+  if (texturedStrokeGestureCanvas.width !== width) texturedStrokeGestureCanvas.width = width;
+  if (texturedStrokeGestureCanvas.height !== height) texturedStrokeGestureCanvas.height = height;
+  return texturedStrokeGestureCanvas;
+}
+
+type TexturedStrokeGestureState = {
+  layerId: string;
+  idsKey: string;
+  pointCounts: Map<string, number>;
+};
+let texturedStrokeGestureState: TexturedStrokeGestureState | null = null;
+
+// draftObjects中の鉛筆/筆draft(通常1件、ミラー描画モードでは元と反転の
+// 2件)を、進行中ジェスチャーのアキュムレーションcanvasへ差分だけ追記して
+// 返す。呼び出し側はこのcanvasをそのままtargetへdrawImageする。
+function renderIncrementalTexturedStrokeDrafts(
+  drafts: StrokeObject[],
+  layerId: string,
+  committedSurface: HTMLCanvasElement,
+  width: number,
+  height: number,
+): HTMLCanvasElement {
+  const canvas = getTexturedStrokeGestureCanvas(width, height);
+  const gctx = canvas.getContext('2d');
+  if (!gctx) return committedSurface;
+
+  const idsKey = drafts.map((draft) => draft.id).sort().join(',');
+  const isSameGesture = texturedStrokeGestureState?.layerId === layerId && texturedStrokeGestureState.idsKey === idsKey;
+  if (!isSameGesture) {
+    gctx.clearRect(0, 0, width, height);
+    gctx.globalCompositeOperation = 'source-over';
+    gctx.globalAlpha = 1;
+    gctx.drawImage(committedSurface, 0, 0);
+    texturedStrokeGestureState = { layerId, idsKey, pointCounts: new Map() };
   }
-  return object;
+
+  for (const draft of drafts) {
+    const previousCount = texturedStrokeGestureState!.pointCounts.get(draft.id) ?? 0;
+    const currentCount = draft.points.length;
+    if (currentCount <= previousCount) continue;
+    if (currentCount < 2) continue; // 1点だけではまだセグメントが無い(commit時のみ点として描かれる)
+    const fromSegment = previousCount < 2 ? 0 : Math.max(0, (previousCount - 1) - TEXTURED_STROKE_RETOUCH_SEGMENTS);
+    const toSegment = currentCount - 2;
+    if (draft.brush === 'pencil') drawPencilStroke(gctx, draft, fromSegment, toSegment);
+    else drawBrushStroke(gctx, draft, fromSegment, toSegment);
+    texturedStrokeGestureState!.pointCounts.set(draft.id, currentCount);
+  }
+  return canvas;
 }
 
 export function renderDocument(
@@ -471,23 +558,52 @@ export function renderDocument(
     target.save();
     target.globalAlpha = Math.max(0.1, Math.min(1, layer.opacity ?? 1));
 
-    if (draftObjects && draftObjects.length > 0 && layer.id === document.activeLayerId) {
-      const preview = getDraftSurface(document.width, document.height);
-      const previewCtx = preview.getContext('2d');
-      if (!previewCtx) {
-        target.restore();
-        continue;
+    const isActiveLayer = layer.id === document.activeLayerId;
+    const texturedDrafts = isActiveLayer ? (draftObjects?.filter(isTexturedStrokeDraft) ?? []) : [];
+
+    if (texturedDrafts.length > 0) {
+      const otherDrafts = draftObjects?.filter((object) => !isTexturedStrokeDraft(object)) ?? [];
+      const gestureCanvas = renderIncrementalTexturedStrokeDrafts(texturedDrafts, layer.id, surface, document.width, document.height);
+
+      if (otherDrafts.length > 0) {
+        const preview = getDraftSurface(document.width, document.height);
+        const previewCtx = preview.getContext('2d');
+        if (previewCtx) {
+          previewCtx.clearRect(0, 0, document.width, document.height);
+          previewCtx.globalCompositeOperation = 'source-over';
+          previewCtx.globalAlpha = 1;
+          previewCtx.drawImage(gestureCanvas, 0, 0);
+          for (const other of otherDrafts) renderObject(previewCtx, other, document.width, document.height);
+          target.drawImage(preview, 0, 0);
+        } else {
+          target.drawImage(gestureCanvas, 0, 0);
+        }
+      } else {
+        target.drawImage(gestureCanvas, 0, 0);
       }
-      previewCtx.clearRect(0, 0, document.width, document.height);
-      previewCtx.globalCompositeOperation = 'source-over';
-      previewCtx.globalAlpha = 1;
-      previewCtx.drawImage(surface, 0, 0);
-      for (const draftObject of draftObjects) {
-        renderObject(previewCtx, previewSafeDraftObject(draftObject), document.width, document.height);
-      }
-      target.drawImage(preview, 0, 0);
     } else {
-      target.drawImage(surface, 0, 0);
+      // このレイヤーで進行中だった鉛筆/筆ジェスチャーが無くなった(コミット/
+      // キャンセルされた)ら、次回のブレを避けるため蓄積状態を破棄する。
+      if (isActiveLayer && texturedStrokeGestureState?.layerId === layer.id) texturedStrokeGestureState = null;
+
+      if (draftObjects && draftObjects.length > 0 && isActiveLayer) {
+        const preview = getDraftSurface(document.width, document.height);
+        const previewCtx = preview.getContext('2d');
+        if (!previewCtx) {
+          target.restore();
+          continue;
+        }
+        previewCtx.clearRect(0, 0, document.width, document.height);
+        previewCtx.globalCompositeOperation = 'source-over';
+        previewCtx.globalAlpha = 1;
+        previewCtx.drawImage(surface, 0, 0);
+        for (const draftObject of draftObjects) {
+          renderObject(previewCtx, draftObject, document.width, document.height);
+        }
+        target.drawImage(preview, 0, 0);
+      } else {
+        target.drawImage(surface, 0, 0);
+      }
     }
     target.restore();
   }
