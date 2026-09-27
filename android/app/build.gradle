@@ -2,6 +2,13 @@ apply plugin: 'com.android.application'
 
 def webPackageJson = new groovy.json.JsonSlurper().parse(file('../../package.json'))
 
+def releaseStoreFile = System.getenv("ANDROID_KEYSTORE_PATH")
+def releaseStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+def releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword]
+    .every { value -> value != null && !value.trim().isEmpty() }
+
 android {
     namespace = "com.cloud42labo.kidsoekaki"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -10,7 +17,7 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // versionName mirrors package.json (SemVer, docs/ANDROID_DISTRIBUTION.md).
-        // versionCode is an independent monotonic integer, bumped by ANDROID_VERSION_CODE per build.
+        // CI injects a monotonic ANDROID_VERSION_CODE for distributable builds.
         versionCode (System.getenv("ANDROID_VERSION_CODE") ? System.getenv("ANDROID_VERSION_CODE").toInteger() : 1)
         versionName webPackageJson.version
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -20,10 +27,38 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+
+        // One-time bridge for users who already have drawings in the old ephemeral
+        // debug-signed APK. It is release-equivalent but debuggable so run-as can
+        // restore the backed-up WebView/IndexedDB data. Do not distribute this as
+        // the normal app; install the release build over it immediately afterward.
+        migration {
+            initWith release
+            debuggable true
+            matchingFallbacks = ['release']
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
