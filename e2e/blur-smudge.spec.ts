@@ -114,12 +114,13 @@ test('ぼかしは赤と青の境界を混色し、白っぽく薄めない', as
 });
 
 // Codexレビュー(PR #17)指摘: ライブpreview中の毎フレーム全域再計算は
-// 低スペックAndroid端末で描画負荷になり得るため、preview中(ドラッグ中)
-// だけ直近の点数へ絞って計算するようにした(renderer.tsのMAX_LIVE_BLUR_
-// PREVIEW_POINTS)。commit(pointer-up)時は常に完全なpointsを使うため、
-// 48点を大きく超える長いドラッグでも、ストロークの始点付近まで含めて
-// 最終結果は正しく混色されることを確認する。
-test('長いぼかしドラッグ(48点超)でも、始点付近まで含めて最終結果が正しく混色される', async ({ page }) => {
+// 低スペックAndroid端末で描画負荷になり得るため、preview中(ドラッグ中)は
+// ジェスチャー単位のアキュムレーションcanvasへ「前回処理済み〜今回」の
+// 差分区間だけを追記する(renderer.tsのrenderIncrementalBlurDraft)。
+// commit(pointer-up)時は常に完全なpointsを使って1回だけ再計算するため、
+// 長いドラッグでも、ストロークの始点付近まで含めて最終結果は正しく
+// 混色されることを確認する。
+test('長いぼかしドラッグでも、始点付近まで含めて最終結果が正しく混色される', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: /まっしろ/ }).click();
   await page.getByRole('button', { name: /たて/ }).click();

@@ -161,8 +161,20 @@ function drawStroke(ctx: CanvasRenderingContext2D, stroke: StrokeObject) {
   ctx.restore();
 }
 
-function drawBlurMask(ctx: CanvasRenderingContext2D, blur: BlurObject, offsetX: number, offsetY: number) {
-  if (!blur.points.length) return;
+// fromIndex/toIndex(半開区間)を絞ることで、ストローク全体ではなく一部の
+// 区間だけのマスクを描ける。ライブpreviewの差分更新(renderIncrementalBlurDraft
+// 参照)は、既に処理済みの区間を毎フレーム描き直さないためにこれを使う。
+// 省略時は従来通り全区間(コミット・旧保存データの再描画で使う経路)。
+function drawBlurMask(
+  ctx: CanvasRenderingContext2D,
+  blur: BlurObject,
+  offsetX: number,
+  offsetY: number,
+  fromIndex = 0,
+  toIndex = blur.points.length,
+) {
+  const points = blur.points;
+  if (toIndex <= fromIndex) return;
   ctx.save();
   ctx.strokeStyle = '#ffffff';
   ctx.fillStyle = '#ffffff';
@@ -172,20 +184,53 @@ function drawBlurMask(ctx: CanvasRenderingContext2D, blur: BlurObject, offsetX: 
   ctx.lineJoin = 'round';
   ctx.lineWidth = Math.max(1, blur.size);
 
-  if (blur.points.length === 1) {
-    const p = blur.points[0];
+  if (toIndex - fromIndex === 1) {
+    const p = points[fromIndex];
     ctx.beginPath();
     ctx.arc(p.x - offsetX, p.y - offsetY, Math.max(0.5, blur.size / 2), 0, Math.PI * 2);
     ctx.fill();
   } else {
     ctx.beginPath();
-    ctx.moveTo(blur.points[0].x - offsetX, blur.points[0].y - offsetY);
-    for (let i = 1; i < blur.points.length; i += 1) {
-      ctx.lineTo(blur.points[i].x - offsetX, blur.points[i].y - offsetY);
+    ctx.moveTo(points[fromIndex].x - offsetX, points[fromIndex].y - offsetY);
+    for (let i = fromIndex + 1; i < toIndex; i += 1) {
+      ctx.lineTo(points[i].x - offsetX, points[i].y - offsetY);
     }
     ctx.stroke();
   }
   ctx.restore();
+}
+
+// blur.pointsのうち[fromIndex, toIndex)区間だけを使って処理対象の矩形
+// (canvas座標のsx/sy + 幅高さ)を計算する。区間を絞るほど、ライブpreview
+// 1フレームあたりの処理量がその区間のbounding boxだけに収まる
+// (ストローク全体の長さに比例しない)。
+function computeBlurRegion(
+  points: { x: number; y: number }[],
+  fromIndex: number,
+  toIndex: number,
+  size: number,
+  strength: number,
+  canvasWidth: number,
+  canvasHeight: number,
+) {
+  const margin = size / 2 + strength * 3 + 2;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = fromIndex; i < toIndex; i += 1) {
+    const point = points[i];
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  const sx = Math.max(0, Math.floor(minX - margin));
+  const sy = Math.max(0, Math.floor(minY - margin));
+  const ex = Math.min(canvasWidth, Math.ceil(maxX + margin));
+  const ey = Math.min(canvasHeight, Math.ceil(maxY + margin));
+  return { sx, sy, width: Math.max(1, ex - sx), height: Math.max(1, ey - sy) };
 }
 
 // 1次元の箱型フィルタ(box blur)。累積和で境界をclampしながら
@@ -276,27 +321,17 @@ function smudgeColors(imageData: ImageData, radius: number) {
 // できるよう、旧Gaussian blur実装をそのまま残して使い続ける
 // (Codexレビュー指摘: 新アルゴリズムへ暗黙に差し替えると既存作品の
 // 見た目とサムネイルが無断で変わってしまう)。
-function applyBlurGaussianLegacy(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
-  if (!blur.points.length) return;
+function applyBlurGaussianLegacy(
+  ctx: CanvasRenderingContext2D,
+  blur: BlurObject,
+  canvasWidth: number,
+  canvasHeight: number,
+  fromIndex = 0,
+  toIndex = blur.points.length,
+) {
+  if (toIndex <= fromIndex) return;
   const strength = Math.max(1, Math.min(20, blur.strength));
-  const margin = blur.size / 2 + strength * 3 + 2;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const point of blur.points) {
-    minX = Math.min(minX, point.x);
-    minY = Math.min(minY, point.y);
-    maxX = Math.max(maxX, point.x);
-    maxY = Math.max(maxY, point.y);
-  }
-
-  const sx = Math.max(0, Math.floor(minX - margin));
-  const sy = Math.max(0, Math.floor(minY - margin));
-  const ex = Math.min(canvasWidth, Math.ceil(maxX + margin));
-  const ey = Math.min(canvasHeight, Math.ceil(maxY + margin));
-  const width = Math.max(1, ex - sx);
-  const height = Math.max(1, ey - sy);
+  const { sx, sy, width, height } = computeBlurRegion(blur.points, fromIndex, toIndex, blur.size, strength, canvasWidth, canvasHeight);
 
   const blurred = getBlurSurface(width, height);
   const blurCtx = blurred.getContext('2d');
@@ -314,7 +349,7 @@ function applyBlurGaussianLegacy(ctx: CanvasRenderingContext2D, blur: BlurObject
   blurCtx.restore();
 
   maskCtx.clearRect(0, 0, width, height);
-  drawBlurMask(maskCtx, blur, sx, sy);
+  drawBlurMask(maskCtx, blur, sx, sy, fromIndex, toIndex);
 
   // ぼかしたコピーをブラシ形状だけ残す。
   blurCtx.save();
@@ -341,33 +376,23 @@ function applyBlurGaussianLegacy(ctx: CanvasRenderingContext2D, blur: BlurObject
 // 色として混ぜ込まれたり、境界が白っぽく薄まったりすることがない。
 // effect自体をDocumentへ保持するため、通常表示・Undo/Redo・途中保存・
 // PNG exportで同じ結果を決定論的に再生できる。
-function applyBlurSmudge(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
-  if (!blur.points.length) return;
+function applyBlurSmudge(
+  ctx: CanvasRenderingContext2D,
+  blur: BlurObject,
+  canvasWidth: number,
+  canvasHeight: number,
+  fromIndex = 0,
+  toIndex = blur.points.length,
+) {
+  if (toIndex <= fromIndex) return;
   const strength = Math.max(1, Math.min(20, blur.strength));
-  const margin = blur.size / 2 + strength * 3 + 2;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const point of blur.points) {
-    minX = Math.min(minX, point.x);
-    minY = Math.min(minY, point.y);
-    maxX = Math.max(maxX, point.x);
-    maxY = Math.max(maxY, point.y);
-  }
-
-  const sx = Math.max(0, Math.floor(minX - margin));
-  const sy = Math.max(0, Math.floor(minY - margin));
-  const ex = Math.min(canvasWidth, Math.ceil(maxX + margin));
-  const ey = Math.min(canvasHeight, Math.ceil(maxY + margin));
-  const width = Math.max(1, ex - sx);
-  const height = Math.max(1, ey - sy);
+  const { sx, sy, width, height } = computeBlurRegion(blur.points, fromIndex, toIndex, blur.size, strength, canvasWidth, canvasHeight);
 
   const mask = getBlurMaskSurface(width, height);
   const maskCtx = mask.getContext('2d');
   if (!maskCtx) return;
   maskCtx.clearRect(0, 0, width, height);
-  drawBlurMask(maskCtx, blur, sx, sy);
+  drawBlurMask(maskCtx, blur, sx, sy, fromIndex, toIndex);
   const maskData = maskCtx.getImageData(0, 0, width, height).data;
 
   const region = ctx.getImageData(sx, sy, width, height);
@@ -444,9 +469,16 @@ function drawStamp(ctx: CanvasRenderingContext2D, object: Extract<DrawingObject,
   ctx.restore();
 }
 
-function applyBlur(ctx: CanvasRenderingContext2D, blur: BlurObject, canvasWidth: number, canvasHeight: number) {
-  if (blur.algorithm === 'smudge') applyBlurSmudge(ctx, blur, canvasWidth, canvasHeight);
-  else applyBlurGaussianLegacy(ctx, blur, canvasWidth, canvasHeight);
+function applyBlur(
+  ctx: CanvasRenderingContext2D,
+  blur: BlurObject,
+  canvasWidth: number,
+  canvasHeight: number,
+  fromIndex = 0,
+  toIndex = blur.points.length,
+) {
+  if (blur.algorithm === 'smudge') applyBlurSmudge(ctx, blur, canvasWidth, canvasHeight, fromIndex, toIndex);
+  else applyBlurGaussianLegacy(ctx, blur, canvasWidth, canvasHeight, fromIndex, toIndex);
 }
 
 function renderObject(ctx: CanvasRenderingContext2D, object: DrawingObject, width: number, height: number) {
@@ -479,19 +511,75 @@ function pruneLayerCache(document: DrawingDocument) {
   }
 }
 
-// ドラッグ中のライブpreviewは指の動きのたびにrenderDocumentが呼ばれ、
-// そのたびに毎回previewCtxをまっさら(committed surfaceのコピー)から
-// draftObjectsを再生する。ぼかし(スマッジ)はO(領域サイズ)のJS convolution
-// であり、ネイティブのcanvas filterと違ってGPU合成されないため、ストローク
-// が伸びるほど領域が育ち続けると指を動かすたびに際限なく重くなる
-// (Codexレビュー指摘)。previewの間だけ、直近の点に絞った小さな領域で
-// 計算する。commit時(onCommitBlur)には常に完全なpointsを使うため、
-// 最終的な見た目・保存結果はこのトリミングの影響を受けない。
-const MAX_LIVE_BLUR_PREVIEW_POINTS = 48;
+// ドラッグ中のライブpreviewは指の動きのたびにrenderDocumentが呼ばれる。
+// ぼかし(スマッジ)はO(領域サイズ)のJS convolutionであり、ネイティブの
+// canvas filterと違ってGPU合成されない。以前は毎フレームpreviewを
+// committed surfaceへ丸ごとリセットしてから「直近の点に絞った」draftを
+// 再生していたが、これは2つの問題を残した(Codexレビュー指摘、収束
+// 再レビュー分):
+//   (a) 「直近の点」は点の"個数"で絞っているだけで、1点あたりの移動距離
+//       (=領域サイズ)は無制限のため、速く/大きく動かすフレームは依然
+//       重くなり得る。
+//   (b) 毎フレームcommitted surfaceへ戻すため、直近の点より前に既に
+//       スマッジ済みだった部分が一瞬消えてから復元される「ちらつき」が
+//       見える。
+// そこで、ジェスチャー(1回のpointerdown〜pointerup)単位で永続する
+// アキュムレーションcanvas(blurGestureCanvas)を持ち、フレームごとに
+// 「前回まで処理済みの点数」から「今回までの点数」までの区間だけを
+// applyBlur(range引数)で追記する。区間の始点は直前に処理した最後の点を
+// 1つ含める(fromIndex = 前回処理済み点数 - 1)ことで、マスクの線が
+// 前の区間と視覚的につながる。これにより1フレームあたりの処理量は
+// その区間のbounding boxだけに比例し(ストローク全体の長さに依存せず)、
+// かつ既に処理済みの見た目はアキュムレーションcanvas上に残り続けるため
+// ちらつかない。commit時(onCommitBlur)は常にこのpreview経路を経由せず、
+// layerSurfacesのキャッシュ無効化から完全なpointsで1回だけ再計算される
+// ため、このインクリメンタル処理は最終的な見た目・保存結果に影響しない。
+let blurGestureCanvas: HTMLCanvasElement | null = null;
+function getBlurGestureCanvas(width: number, height: number) {
+  if (!blurGestureCanvas) blurGestureCanvas = document.createElement('canvas');
+  if (blurGestureCanvas.width !== width) blurGestureCanvas.width = width;
+  if (blurGestureCanvas.height !== height) blurGestureCanvas.height = height;
+  return blurGestureCanvas;
+}
 
-function previewSafeDraftObject(object: DrawingObject): DrawingObject {
-  if (object.type !== 'blur' || object.points.length <= MAX_LIVE_BLUR_PREVIEW_POINTS) return object;
-  return { ...object, points: object.points.slice(-MAX_LIVE_BLUR_PREVIEW_POINTS) };
+type BlurGestureState = {
+  id: string;
+  layerId: string;
+  pointCount: number;
+};
+let blurGestureState: BlurGestureState | null = null;
+
+// draftObjects(1件、blur型)を、進行中ジェスチャーのアキュムレーション
+// canvasへ差分だけ追記して返す。呼び出し側はこのcanvasをそのまま
+// (あるいは他のdraftObjectと合成してから)targetへdrawImageする。
+function renderIncrementalBlurDraft(
+  blurDraft: BlurObject,
+  layerId: string,
+  committedSurface: HTMLCanvasElement,
+  width: number,
+  height: number,
+): HTMLCanvasElement {
+  const canvas = getBlurGestureCanvas(width, height);
+  const gctx = canvas.getContext('2d');
+  if (!gctx) return committedSurface;
+
+  const isSameGesture = blurGestureState?.id === blurDraft.id && blurGestureState.layerId === layerId;
+  if (!isSameGesture) {
+    gctx.clearRect(0, 0, width, height);
+    gctx.globalCompositeOperation = 'source-over';
+    gctx.globalAlpha = 1;
+    gctx.drawImage(committedSurface, 0, 0);
+    blurGestureState = { id: blurDraft.id, layerId, pointCount: 0 };
+  }
+
+  const previousCount = blurGestureState!.pointCount;
+  const currentCount = blurDraft.points.length;
+  if (currentCount > previousCount) {
+    const fromIndex = Math.max(0, previousCount - 1);
+    applyBlur(gctx, blurDraft, width, height, fromIndex, currentCount);
+    blurGestureState!.pointCount = currentCount;
+  }
+  return canvas;
 }
 
 export function renderDocument(
@@ -513,23 +601,57 @@ export function renderDocument(
     target.save();
     target.globalAlpha = Math.max(0.1, Math.min(1, layer.opacity ?? 1));
 
-    if (draftObjects && draftObjects.length > 0 && layer.id === document.activeLayerId) {
-      const preview = getDraftSurface(document.width, document.height);
-      const previewCtx = preview.getContext('2d');
-      if (!previewCtx) {
-        target.restore();
-        continue;
+    const isActiveLayer = layer.id === document.activeLayerId;
+    const blurDraft = isActiveLayer
+      ? draftObjects?.find((object): object is BlurObject => object.type === 'blur')
+      : undefined;
+
+    if (blurDraft) {
+      // blurは高速pathを持たず(CanvasStage側もmirror非対応)、draftObjectsは
+      // 常にこの1件のみ。他type(stroke/stamp)と同時に来ることは無い前提だが、
+      // 念のため残っていた場合は差分canvasの上から通常通り重ねる。
+      const otherDrafts = draftObjects?.filter((object) => object !== blurDraft) ?? [];
+      const gestureCanvas = renderIncrementalBlurDraft(blurDraft, layer.id, surface, document.width, document.height);
+
+      if (otherDrafts.length > 0) {
+        const preview = getDraftSurface(document.width, document.height);
+        const previewCtx = preview.getContext('2d');
+        if (previewCtx) {
+          previewCtx.clearRect(0, 0, document.width, document.height);
+          previewCtx.globalCompositeOperation = 'source-over';
+          previewCtx.globalAlpha = 1;
+          previewCtx.drawImage(gestureCanvas, 0, 0);
+          for (const other of otherDrafts) renderObject(previewCtx, other, document.width, document.height);
+          target.drawImage(preview, 0, 0);
+        } else {
+          target.drawImage(gestureCanvas, 0, 0);
+        }
+      } else {
+        target.drawImage(gestureCanvas, 0, 0);
       }
-      previewCtx.clearRect(0, 0, document.width, document.height);
-      previewCtx.globalCompositeOperation = 'source-over';
-      previewCtx.globalAlpha = 1;
-      previewCtx.drawImage(surface, 0, 0);
-      for (const draftObject of draftObjects) {
-        renderObject(previewCtx, previewSafeDraftObject(draftObject), document.width, document.height);
-      }
-      target.drawImage(preview, 0, 0);
     } else {
-      target.drawImage(surface, 0, 0);
+      // このレイヤーで進行中だったblurジェスチャーが無くなった(コミット/
+      // キャンセルされた)ら、次回のブレを避けるため蓄積状態を破棄する。
+      if (isActiveLayer && blurGestureState?.layerId === layer.id) blurGestureState = null;
+
+      if (draftObjects && draftObjects.length > 0 && isActiveLayer) {
+        const preview = getDraftSurface(document.width, document.height);
+        const previewCtx = preview.getContext('2d');
+        if (!previewCtx) {
+          target.restore();
+          continue;
+        }
+        previewCtx.clearRect(0, 0, document.width, document.height);
+        previewCtx.globalCompositeOperation = 'source-over';
+        previewCtx.globalAlpha = 1;
+        previewCtx.drawImage(surface, 0, 0);
+        for (const draftObject of draftObjects) {
+          renderObject(previewCtx, draftObject, document.width, document.height);
+        }
+        target.drawImage(preview, 0, 0);
+      } else {
+        target.drawImage(surface, 0, 0);
+      }
     }
     target.restore();
   }
