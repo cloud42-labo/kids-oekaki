@@ -43,6 +43,29 @@ button { -webkit-tap-highlight-color: transparent; }
 .preset-card strong { font-size: 17px; }
 .preset-card small { font-size: 12px; }
 
+/* コマわりプリセット選択画面専用。6プリセット(760px以下では2列3段)+見出し+
+   もどるボタンの合計高さが、一般的なスマートフォンのビューポート高さ
+   (640〜720px程度)を超えることがある。他の画面(白紙/向き選択)は
+   .start-screen の place-items:center による縦中央寄せのままにしたいので、
+   ここではこの画面専用のクラスにだけ絞ってスクロールを許可する
+   （html/body/#rootのoverflow:hiddenはページ全体のバウンス防止用のまま変更しない。
+   .start-screen-presetが自分自身のoverflow-y:autoでスクロールコンテナになるため、
+   祖先のoverflow:hiddenとは競合しない）。
+   align-itemsをcenterのままにすると、はみ出し分が上下に均等に発生し、
+   ブラウザによっては上側にはみ出た分へスクロールで到達できない
+   （centerで発生する上方向オーバーフローがscrollTopの負値に相当し、
+   多くの環境で到達不能になる既知の問題）。startに変えることで、
+   はみ出しは常に下方向だけになり、先頭から下向きスクロールで
+   6プリセット全部と「かみをえらびなおす」ボタンに必ず到達できる。 */
+.start-screen-preset {
+  align-items: start;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.start-screen-preset .start-card {
+  margin: 24px auto;
+}
+
 /* Androidのedge-to-edge描画（targetSdk 35+で既定）では、WebViewがシステムバーの
    裏側まで含めた画面全体で描画されるため、ツールバー（先頭子要素）が
    ステータスバーの、ワークスペース下端がナビゲーションバーの裏に回り込む。

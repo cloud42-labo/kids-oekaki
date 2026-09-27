@@ -137,9 +137,20 @@ export function drawTemplate(
   }
 
   // '4koma'は移行前(OEK-05-S04-T04以前)に保存された旧作品の後方互換値。
-  // 新規作成では選べないが、'grid-4'プリセットと同じコマ割りで描き続ける。
+  // 新規作成では選べない。過去に保存済みの作品は、すでに描かれたstrokeが
+  // 当時のfixed-50pxジオメトリのコマ位置を前提に保存されているため、
+  // 'grid-4'の比率ベースdrawPanelFramesに乗せ換えると枠が絵とズレる
+  // （移行前と移行後で外枠マージン・コマ間隔が変わるため）。
+  // そのため'4koma'だけは、このタスク以前の実装と完全に同じ固定pxの
+  // 描画式をそのまま残す(pixel-identicalであることが目的なので、
+  // 将来ここを触るときもこの計算式自体は変更しないこと)。
   if (template === '4koma') {
-    drawPanelFrames(ctx, getMangaPreset('grid-4').panels, width, height);
+    const margin = 50;
+    const boxHeight = (height - margin * 5) / 4;
+    ctx.lineWidth = 4;
+    for (let i = 0; i < 4; i += 1) {
+      ctx.strokeRect(margin, margin + (boxHeight + margin) * i, width - margin * 2, boxHeight);
+    }
   }
 
   // 'diary'も同様に、絵日記モード廃止(OEK-05-S04-T04)前の旧作品を壊さないための

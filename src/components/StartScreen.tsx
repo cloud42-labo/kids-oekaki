@@ -151,7 +151,7 @@ export function StartScreen({ onStart, onContinue, onDelete, onRename, savedSess
 
   if (step === 'preset') {
     return (
-      <main className="start-screen">
+      <main className="start-screen start-screen-preset">
         <div className="start-card">
           <div className="mascot" aria-hidden="true">💬</div>
           <h1>どの コマわり？</h1>

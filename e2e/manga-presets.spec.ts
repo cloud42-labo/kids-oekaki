@@ -224,3 +224,40 @@ test.describe('漫画モード: 変則コマ割りプリセット', () => {
     expect(isDarkLine(await readPixel(page, insideBottomLeftRatio.x, insideBottomLeftRatio.y))).toBe(true);
   });
 });
+
+// Codexレビュー指摘(P1, comment_id 4114080721): 760px以下の幅では6プリセットが
+// 2列3段になり、見出し・マスコット・もどるボタンを含めた合計高さが一般的な
+// スマートフォンのビューポート高さ(640〜720px程度)を超える。html/body/#rootの
+// overflow:hiddenとこの画面自体にスクロール手段が無いと、下段のプリセットや
+// もどるボタンに到達できなくなる回帰。このdescribeだけ、ファイル先頭の
+// test.use({viewport:900x1300})を上書きしてスマホサイズの高さで検証する。
+test.describe('コマわりプリセット選択画面: スマホサイズの高さでもスクロールで全項目に到達できる', () => {
+  test.use({ viewport: { width: 375, height: 667 } });
+
+  test('6プリセット全部と「かみをえらびなおす」ボタンにスクロールで到達できる', async ({ page }) => {
+    const group = await goToMangaPresetPicker(page);
+    const presetButtons = group.getByRole('button');
+    await expect(presetButtons).toHaveCount(MANGA_PRESETS.length);
+
+    // .start-screen-preset自体がスクロールコンテナになっている前提
+    // (src/styles.cssの.start-screen-preset)。overflow:hiddenのまま
+    // スクロール手段が無い回帰が起きていれば、ここでfalseになる。
+    const scrollContainer = page.locator('.start-screen-preset');
+    await expect(scrollContainer).toBeVisible();
+    await expect
+      .poll(() => scrollContainer.evaluate((el) => el.scrollHeight > el.clientHeight + 1))
+      .toBe(true);
+
+    for (const preset of MANGA_PRESETS) {
+      const card = group.getByRole('button', { name: labelPattern(preset.label) });
+      await card.scrollIntoViewIfNeeded();
+      await expect(card).toBeInViewport();
+    }
+
+    const backButton = page.getByRole('button', { name: /かみを えらびなおす/ });
+    await backButton.scrollIntoViewIfNeeded();
+    await expect(backButton).toBeInViewport();
+    await backButton.click();
+    await expect(page.getByRole('heading', { name: 'なにを かく？' })).toBeVisible();
+  });
+});
