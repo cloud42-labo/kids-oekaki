@@ -138,11 +138,19 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
       <div className="toolbar-spacer" />
 
       <div className="creative-actions">
-        <button className="text-action toolbar-action-back" onClick={onReturnToStart} disabled={saveState === 'saving'} aria-label="開始画面へ戻る">⌂ <span>もどる</span></button>
+        {/* OEK-05-S04-BUG02 review fix: DOM順をportraitの視覚順（太さ→Undo/Redo→
+           保存→PNG→戻る）に合わせる。以前はCSSのorderだけで戻るを末尾へ視覚的に
+           動かしていたが、DOM/タブ順は戻るが先頭のままだったため、キーボード/
+           スイッチ操作でスライダーの次に戻る(右端)へ飛び、そこからUndoへ戻る
+           という视覚順とタブ順の不一致が生じていた（Codexレビュー指摘
+           PRRT_kwDOUiR8RM6mYwYx）。landscapeの現行表示（戻るが先頭）は
+           creative-ui.cssの@media (orientation: landscape)側でorder: -1を
+           当てて視覚順のみ維持する（DOM順は変えない）。 */}
         <button className="icon-action toolbar-action-undo" disabled={!canUndo} onClick={onUndo} aria-label="ひとつ戻る" title="戻る">↶</button>
         <button className="icon-action toolbar-action-redo" disabled={!canRedo} onClick={onRedo} aria-label="やり直す" title="やり直す">↷</button>
         <button className="text-action primary toolbar-action-save" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
         <button className="text-action toolbar-action-png" onClick={onExportPng}>⇩ <span>PNG</span></button>
+        <button className="text-action toolbar-action-back" onClick={onReturnToStart} disabled={saveState === 'saving'} aria-label="開始画面へ戻る">⌂ <span>もどる</span></button>
       </div>
     </header>
   );

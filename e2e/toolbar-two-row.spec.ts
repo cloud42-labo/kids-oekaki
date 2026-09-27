@@ -52,6 +52,18 @@ async function assertReachableWithoutScroll(page: Page, locator: Locator) {
   expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
 }
 
+async function drawStroke(page: Page) {
+  const canvasBox = await page.locator('.canvas-frame canvas').first().boundingBox();
+  if (!canvasBox) throw new Error('canvas not found');
+  const fromX = canvasBox.x + canvasBox.width * 0.2;
+  const toX = canvasBox.x + canvasBox.width * 0.8;
+  const y = canvasBox.y + canvasBox.height * 0.5;
+  await page.mouse.move(fromX, y);
+  await page.mouse.down();
+  await page.mouse.move(toX, y);
+  await page.mouse.up();
+}
+
 async function assertNoHorizontalScrollNeeded(page: Page) {
   const toolbar = page.locator('.creative-toolbar');
   const info = await toolbar.evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
@@ -96,6 +108,39 @@ test.describe('ツールバーのportrait 2段レスポンシブ化 (OEK-05-S04-
       await expect(controls.sizeSlider).toHaveValue('42');
     });
   }
+
+  test('portrait: 太さスライダーからのTab順が視覚順（太さ→Undo→Redo→保存→PNG→戻る）と一致する（Codexレビュー指摘 PRRT_kwDOUiR8RM6mYwYx）', async ({ page }) => {
+    await page.setViewportSize({ width: 412, height: 915 });
+    await startBlankDrawing(page);
+
+    // Undo/Redoともに有効化しておく(disabledなボタンはTab順に現れないため)。
+    // 2回描いてからUndoを1回押すことで、Undo(過去が残っている)・Redo(取り消し
+    // 済みが1件ある)の両方をenabledにする。
+    await drawStroke(page);
+    await drawStroke(page);
+    const controls = row2Controls(page);
+    await controls.undo.click();
+    await expect(controls.undo).toBeEnabled();
+    await expect(controls.redo).toBeEnabled();
+
+    await controls.sizeSlider.focus();
+    await expect(controls.sizeSlider).toBeFocused();
+
+    // DOM順（=視覚順・タブ順）どおりにUndo→Redo→保存→PNG→戻るへ進むこと。
+    // 以前はCSSのorderだけで戻るを末尾へ視覚移動しており、DOM/タブ順は
+    // 戻るが先頭のままだったため、ここでスライダーの次に戻るへ飛んで
+    // しまっていた。
+    await page.keyboard.press('Tab');
+    await expect(controls.undo).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.redo).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.save).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.png).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.back).toBeFocused();
+  });
 
   test('landscape: 現行の1段構成を維持し、safe-area対応も壊れない', async ({ page }) => {
     await page.setViewportSize({ width: 844, height: 390 });
