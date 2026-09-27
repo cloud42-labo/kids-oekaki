@@ -132,7 +132,6 @@ jobs:
         working-directory: android
         env:
           ANDROID_VERSION_CODE: ${{ steps.version.outputs.migration_code }}
-          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
@@ -142,7 +141,6 @@ jobs:
         working-directory: android
         env:
           ANDROID_VERSION_CODE: ${{ steps.version.outputs.release_code }}
-          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
@@ -188,7 +186,6 @@ jobs:
           fi
 
           echo "::notice::Kids Oekaki fixed signer SHA-1 = $KEYSTORE_SHA1"
-          echo "signer_sha1=$KEYSTORE_SHA1" >> "$GITHUB_OUTPUT"
 
       - name: Package release assets
         shell: bash
@@ -277,4 +274,7 @@ jobs:
 
       - name: Remove signing key from runner
         if: always()
-        run: rm -f "$ANDROID_KEYSTORE_PATH"
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_PATH:-}" ]; then
+            rm -f "$ANDROID_KEYSTORE_PATH"
+          fi
