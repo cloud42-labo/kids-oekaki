@@ -2,10 +2,13 @@ import { useState } from 'react';
 import type { Orientation, TemplateKind } from '../domain/drawing';
 import type { StoredDrawingSession } from '../utils/documentStorage';
 
+// OEK-05-S04-T03: 起動画面の主要選択肢は「白紙 / 漫画 / LINEスタンプ」の3つに整理する
+// (Owner確認 2026-09-26)。絵日記(diary)はここから外し、開始画面からは選べなくする
+// (過去の絵日記作品はTemplateKind上の後方互換値として読み込みだけ維持する)。
 const templates: Array<{ key: TemplateKind; icon: string; label: string; note: string }> = [
   { key: 'blank', icon: '🖍️', label: 'まっしろ', note: 'じゆうに かこう' },
-  { key: '4koma', icon: '💬', label: '4コマまんが', note: 'おはなしを つくろう' },
-  { key: 'diary', icon: '📖', label: 'えにっき', note: 'きょうの おもいで' },
+  { key: '4koma', icon: '💬', label: 'まんが', note: 'おはなしを つくろう' },
+  { key: 'line-sticker', icon: '🏷️', label: 'LINEスタンプ', note: 'すきとおる はいけいで つくる' },
 ];
 
 const orientations: Array<{ key: Orientation; icon: string; label: string; note: string }> = [

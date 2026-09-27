@@ -5,7 +5,21 @@ export const CANVAS_HEIGHT = 1131;
 // 端末を回転させても、これが変わらない限り描いた内容は回転・変形しない。
 export type Orientation = 'portrait' | 'landscape';
 
-export type TemplateKind = 'blank' | '4koma' | 'diary';
+// OEK-05-S04-T03: 起動画面の主要選択肢は「白紙(blank) / 漫画(4koma) / LINEスタンプ
+// (line-sticker)」の3つ。'diary'(絵日記)はOwner確認により廃止され、開始画面からは
+// 選べない。過去に保存済みの絵日記作品を読み込めるようにするため、TemplateKind自体
+// からは削除せず、drawTemplate側の後方互換分岐だけ残す。
+export type TemplateKind = 'blank' | '4koma' | 'diary' | 'line-sticker';
+
+// LINEスタンプモード専用の判定。Owner確認(2026-09-26)のとおり、これは
+// 「白背景を検出して透明化する」のではなく「このテンプレートでは背景レイヤー
+// そのものを一切描画しない」という設計。未描画部分はcanvasをclearRectした
+// ままのalpha=0を保つ。ユーザーが実際に白色で描いた線・文字・スタンプは
+// 通常のsource-over描画でalpha=1の不透明な白として乗るため、透明化の対象には
+// ならない（対象はあくまで「描かれていない領域」だけ）。
+export function isTransparentBackgroundTemplate(template: TemplateKind): boolean {
+  return template === 'line-sticker';
+}
 export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {

@@ -79,6 +79,23 @@ button { -webkit-tap-highlight-color: transparent; }
 .canvas-area { position: relative; min-width: 0; flex: 1; display: grid; place-items: center; padding: 14px; overflow: hidden; background: linear-gradient(135deg, #c7d3d9, #e8eef1); }
 .canvas-frame { position: relative; max-width: 100%; max-height: 100%; aspect-ratio: 800 / 1131; background: #fff; box-shadow: 0 12px 30px rgba(32,44,51,.25); }
 .canvas-frame canvas { display: block; width: 100%; height: 100%; touch-action: none; background: #fff; }
+/* OEK-05-S04-T03: LINEスタンプモード専用。このモードのcanvasはalpha:trueで
+   生成され、drawTemplate()は背景を一切塗らない(未描画部分はalpha=0のまま)。
+   このチェッカーボードはCSS背景として.canvas-frame/canvasのbox自体に置くだけの
+   表示専用の目印で、canvasのビットマップには一切書き込まれない。そのため
+   renderDocumentを直接呼ぶ別canvas(exportPng/サムネイル生成)には混ざらず、
+   透明PNG書き出しの結果には影響しない。 */
+.canvas-frame-transparent,
+.canvas-frame-transparent canvas {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #d3d8db 25%, transparent 25%),
+    linear-gradient(-45deg, #d3d8db 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d3d8db 75%),
+    linear-gradient(-45deg, transparent 75%, #d3d8db 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0px;
+}
 /* ミラー描画モードの中央軸ガイド。canvas要素には一切描画しない(DOM上のオーバーレイのみ)ため、
    PNG書き出し(renderDocumentを直接呼ぶ別canvas)には絶対に含まれない。 */
 .mirror-axis-guide { position: absolute; top: 0; left: 50%; width: 0; height: 100%; border-left: 3px dashed rgba(51,45,56,.55); pointer-events: none; z-index: 2; transform: translateX(-1.5px); }
