@@ -138,11 +138,11 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
       <div className="toolbar-spacer" />
 
       <div className="creative-actions">
-        <button className="text-action" onClick={onReturnToStart} disabled={saveState === 'saving'} aria-label="開始画面へ戻る">⌂ <span>もどる</span></button>
-        <button className="icon-action" disabled={!canUndo} onClick={onUndo} aria-label="ひとつ戻る" title="戻る">↶</button>
-        <button className="icon-action" disabled={!canRedo} onClick={onRedo} aria-label="やり直す" title="やり直す">↷</button>
-        <button className="text-action primary" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
-        <button className="text-action" onClick={onExportPng}>⇩ <span>PNG</span></button>
+        <button className="text-action toolbar-action-back" onClick={onReturnToStart} disabled={saveState === 'saving'} aria-label="開始画面へ戻る">⌂ <span>もどる</span></button>
+        <button className="icon-action toolbar-action-undo" disabled={!canUndo} onClick={onUndo} aria-label="ひとつ戻る" title="戻る">↶</button>
+        <button className="icon-action toolbar-action-redo" disabled={!canRedo} onClick={onRedo} aria-label="やり直す" title="やり直す">↷</button>
+        <button className="text-action primary toolbar-action-save" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
+        <button className="text-action toolbar-action-png" onClick={onExportPng}>⇩ <span>PNG</span></button>
       </div>
     </header>
   );

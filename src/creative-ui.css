@@ -389,3 +389,55 @@
   .text-action { width: auto; padding: 0 7px; }
   .text-action span { display: inline; font-size: 10px; }
 }
+
+/* OEK-05-S04-BUG02: portraitでは.creative-toolbarを2段構成にする。
+   2026-09-26の実機確認で、縦持ちの狭い幅では上のcompact化ルールだけでは
+   ペン太さスライダーが常時操作できないことが分かった。.creative-toolbarは
+   flex-wrap:nowrapの1段構成のため、幅が足りないと太さスライダー・
+   Undo/Redo・保存・PNG・戻るが末尾へ押し出され、.toolbar（styles.css）の
+   overflow-x:autoによる横スクロールでしか到達できなくなる。個別ボタンの
+   幅調整では直せない構造的な問題のため、情報設計そのものを変える
+   （プロダクトオーナーの指示）。
+
+   1段目 = 描画ツール（primary-tools: ペン種類・スタンプ・ミラー）。
+   2段目 = 太さ・Undo/Redo・保存・PNG・戻る。太さ(compact-size-control)を
+   左に、戻る(toolbar-action-back)を右端に置くため、.creative-actions内で
+   戻るボタンだけorderを繰り下げる（JSX上は先頭要素のまま、DOM順は変えない）。
+
+   landscapeはこのブロックの対象外（orientation:portrait限定）。既存の
+   safe-area-inset対応（横持ちのpadding-left/right、790px container query）は
+   1段構成のまま変更しない。 */
+@media (orientation: portrait) {
+  .creative-toolbar {
+    flex-wrap: wrap;
+    align-content: flex-start;
+    height: auto;
+    min-height: auto;
+    row-gap: 6px;
+  }
+
+  .primary-tools {
+    order: 1;
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .compact-size-control {
+    order: 2;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .toolbar-spacer {
+    order: 3;
+  }
+
+  .creative-actions {
+    order: 4;
+    flex: 0 0 auto;
+  }
+
+  .creative-actions .toolbar-action-back { order: 5; }
+}

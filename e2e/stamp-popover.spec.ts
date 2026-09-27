@@ -98,10 +98,14 @@ test.describe('stamp popover', () => {
   });
 
   test('⑥ ツールバーを横スクロールした後も位置がずれない', async ({ page }) => {
-    // Narrow viewport so the toolbar (many compact-tool buttons) overflows
-    // horizontally (.toolbar has overflow-x: auto from styles.css).
-    await page.setViewportSize({ width: 360, height: 700 });
-    await startBlankDrawing(page);
+    // OEK-05-S04-BUG02で.creative-toolbarはportraitでは2段レスポンシブ化された
+    // ため、360x700のような現実的な縦持ち幅では横スクロールがもはや発生しない
+    // （これが本Task修正の目的そのもの。実測はe2e/toolbar-two-row.spec.ts参照）。
+    // landscapeは既存の1段構成を維持しているため、この横スクロールのフォール
+    // バック自体を検証する回帰テストとしての意味は、縦持ちではなく横持ちの
+    // 狭幅（.toolbarのoverflow-x: auto、styles.css）に残す。
+    await page.setViewportSize({ width: 500, height: 300 });
+    await startBlankDrawing(page, 'よこ');
 
     const toolbar = page.locator('header.toolbar');
     await toolbar.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
