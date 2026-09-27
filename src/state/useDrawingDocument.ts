@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import type { BlurObject, DrawingDocument, DrawingLayer, Orientation, StampObject, StrokeObject, TemplateKind } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, DrawingLayer, MangaPresetKind, Orientation, StampObject, StrokeObject, TemplateKind } from '../domain/drawing';
 import { createInitialDocument } from '../domain/drawing';
 
 const MAX_HISTORY = 60;
@@ -25,8 +25,8 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
     future: [],
   }));
 
-  const reset = useCallback((template: TemplateKind, orientation: Orientation = 'portrait') => {
-    setHistory({ past: [], present: createInitialDocument(template, orientation), future: [] });
+  const reset = useCallback((template: TemplateKind, orientation: Orientation = 'portrait', mangaPreset?: MangaPresetKind) => {
+    setHistory({ past: [], present: createInitialDocument(template, orientation, mangaPreset), future: [] });
   }, []);
 
   const restoreHistory = useCallback((saved: DrawingHistory) => {

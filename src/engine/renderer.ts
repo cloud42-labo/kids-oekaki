@@ -343,7 +343,7 @@ export function renderDocument(
 ) {
   pruneLayerCache(document);
   target.clearRect(0, 0, document.width, document.height);
-  drawTemplate(target, document.template, document.width, document.height);
+  drawTemplate(target, document.template, document.width, document.height, document.mangaPreset);
 
   for (const layer of document.layers) {
     if (!layer.visible) continue;

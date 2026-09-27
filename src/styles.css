@@ -35,6 +35,13 @@ button { -webkit-tap-highlight-color: transparent; }
 .orientation-swatch-portrait { width: 62px; height: 88px; }
 .orientation-swatch-landscape { width: 88px; height: 62px; }
 .back-link { margin-top: 20px; border: 0; background: transparent; color: #756b79; font-weight: 800; font-size: 16px; padding: 8px; }
+.template-card:disabled, .template-card-disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.template-card:disabled:active, .template-card-disabled:active { transform: none; }
+.preset-grid { grid-template-columns: repeat(3, 1fr); }
+.preset-card { min-height: 170px; gap: 6px; }
+.preset-thumbnail { width: 84px; height: auto; border-radius: 6px; box-shadow: 0 1px 4px rgba(51,45,56,.25); background: #fff; }
+.preset-card strong { font-size: 17px; }
+.preset-card small { font-size: 12px; }
 
 /* Androidのedge-to-edge描画（targetSdk 35+で既定）では、WebViewがシステムバーの
    裏側まで含めた画面全体で描画されるため、ツールバー（先頭子要素）が
@@ -103,6 +110,8 @@ button { -webkit-tap-highlight-color: transparent; }
 @media (max-width: 760px) {
   .template-grid { grid-template-columns: 1fr; }
   .template-card { min-height: 125px; }
+  .preset-grid { grid-template-columns: repeat(2, 1fr); }
+  .preset-card { min-height: 150px; }
   .layer-panel { width: 165px; flex-basis: 165px; }
   .toolbar { min-height: 84px; }
   .zoom-controls { top: 12px; right: 12px; }
