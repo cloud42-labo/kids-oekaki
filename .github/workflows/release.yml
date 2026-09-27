@@ -11,16 +11,15 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'src/**'
-      - 'public/**'
-      - 'android/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'capacitor.config.ts'
-      - '.github/workflows/release.yml'
     tags:
       - 'v*'
+
+# Only one release for the same ref may run at a time. For main, a newer push
+# cancels the older rolling release before it can move the shared latest tag/assets
+# back to an older commit/versionCode. Versioned tag releases use separate groups.
+concurrency:
+  group: kids-oekaki-release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
