@@ -33,9 +33,7 @@ style/naming/formatting/nit、一般的best practice、具体的経路のない�
 
 ### Re-reviewはdelta-first
 
-2回目以降は、まず前回のblocking Findingが解消したかと、前回review後のdeltaが新しいblockerを導入したかだけを確認する。毎回PR全体をゼロから探索し直して新しい改善候補を掘り続けない。
-
-新しいblocking Findingを追加する場合は、前回review後のdeltaによって導入または新たに露呈した具体的Evidenceを示す。同じ論点の言い換えは既存Findingへ紐づける。
+2回目以降は、まず前回のblocking Findingが解消したかと、前回review後のdeltaが新しいblockerを導入したかだけを確認する。毎回PR全体をゼロから探索し直して改善候補を掘り続けることはしない。ただし、再レビュー中にPR自身が原因の、current headに成立する新たなEvidence-backed blockerを発見した場合は、delta起因でなくても報告する。この場合もFinding Quality Contractを満たす具体的Evidenceを示す。同じ論点の言い換えは既存Findingへ紐づける。
 
 ## AIレビューだけで完結しない変更
 
