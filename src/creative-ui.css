@@ -401,19 +401,22 @@
 
    1段目 = 描画ツール（primary-tools: ペン種類・スタンプ・ミラー）。
    2段目 = 太さ・Undo/Redo・保存・PNG・戻る。太さ(compact-size-control)を
-   左に、戻る(toolbar-action-back)を右端に置く。この視覚順はToolbar.tsxの
-   JSX/DOM順そのもの（Undo→Redo→保存→PNG→戻る）と一致させてあるため、
-   ここではcreative-actions内の子要素にorderを当てない（キーボード/
-   スイッチ操作のタブ順が視覚順と一致するようにするため。以前はCSSの
-   orderだけで戻るを末尾へ動かしており、DOM順とタブ順が視覚順とずれる
-   問題があった。Codexレビュー指摘 PRRT_kwDOUiR8RM6mYwYx）。
+   左に、戻る(toolbar-action-back)を右端に置く。
+
+   注意: creative-actions内の5ボタン（Undo/Redo/保存/PNG/戻る）の並び順は
+   ここではCSSのorderで制御しない。portrait/landscapeで求める視覚順が
+   異なる（landscape: 戻る→Undo→Redo→保存→PNG、portrait: 太さの次に
+   Undo→Redo→保存→PNG→戻る）ため、CSS orderで見た目だけ入れ替えると
+   DOM順（=キーボード/スイッチ操作のタブ順）が視覚順とずれる
+   （Codexレビュー指摘 PRRT_kwDOUiR8RM6mYwYx, 2回再発：comment_id
+   4114663614 → 4138644275）。かわりにToolbar.tsxのuseIsPortraitViewportが
+   実際のviewport向きを検知し、DOM順そのものを向きごとに並べ替えている
+   （DOM順=視覚順=タブ順を両方の向きで保証する）。このファイルに
+   creative-actionsの子要素へのorderを追加しないこと。
 
    landscapeはこのブロックの対象外（orientation:portrait限定）。既存の
    safe-area-inset対応（横持ちのpadding-left/right、790px container query）は
-   1段構成のまま変更しない。landscapeの戻るボタンの視覚上の先頭表示は、
-   下の@media (orientation: landscape)ブロックでorder: -1により維持する
-   （DOM順は変えないため、landscapeでは視覚順とタブ順が一致しない状態が
-   残るが、これはこのPR以前から変わらないlandscapeの既存挙動そのもの）。 */
+   1段構成のまま変更しない。 */
 @media (orientation: portrait) {
   .creative-toolbar {
     flex-wrap: wrap;
@@ -447,9 +450,3 @@
   }
 }
 
-/* landscapeの1段構成では、戻るボタンを従来どおり視覚上の先頭に置く
-   （このPR以前からのlandscape既存レイアウト。DOM順はUndo/Redo/保存/PNG/
-   戻るのままなので、キーボードのタブ順は変わらず戻るが最後に来る）。 */
-@media (orientation: landscape) {
-  .creative-actions .toolbar-action-back { order: -1; }
-}

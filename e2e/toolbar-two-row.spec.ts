@@ -163,6 +163,51 @@ test.describe('ツールバーのportrait 2段レスポンシブ化 (OEK-05-S04-
     }
   });
 
+  test('landscape: 太さスライダーからのTab順が視覚順（戻る→Undo→Redo→保存→PNG）と一致する（Codexレビュー指摘 comment_id 4138644275）', async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await startBlankDrawing(page, 'よこ');
+
+    // Undo/Redoともに有効化しておく(disabledなボタンはTab順に現れないため)。
+    await drawStroke(page);
+    await drawStroke(page);
+    const controls = row2Controls(page);
+    await controls.undo.click();
+    await expect(controls.undo).toBeEnabled();
+    await expect(controls.redo).toBeEnabled();
+
+    // 視覚順(左→右)がlandscapeの既存レイアウトどおり戻る→Undo→Redo→保存→PNG
+    // であることを、実際のx座標で確認する(portrait用にDOM順を並べ替えても
+    // landscapeの見た目は変わっていないことの確認)。
+    const backBox = await controls.back.boundingBox();
+    const undoBox = await controls.undo.boundingBox();
+    const redoBox = await controls.redo.boundingBox();
+    const saveBox = await controls.save.boundingBox();
+    const pngBox = await controls.png.boundingBox();
+    expect(backBox && undoBox && redoBox && saveBox && pngBox).toBeTruthy();
+    if (!backBox || !undoBox || !redoBox || !saveBox || !pngBox) return;
+    expect(backBox.x).toBeLessThan(undoBox.x);
+    expect(undoBox.x).toBeLessThan(redoBox.x);
+    expect(redoBox.x).toBeLessThan(saveBox.x);
+    expect(saveBox.x).toBeLessThan(pngBox.x);
+
+    // 1回目のレビュー指摘の修正(1f67df5)ではCSSのorderだけでlandscapeの
+    // 戻るを視覚上先頭に戻したため、DOM/タブ順はUndo始まりのままずれていた
+    // (2回目のレビュー指摘)。今回はDOM順そのものを向きごとに並べ替えて
+    // いるため、太さスライダーの次のTabで視覚どおり戻るへ進むこと。
+    await controls.sizeSlider.focus();
+    await expect(controls.sizeSlider).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.back).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.undo).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.redo).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.save).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(controls.png).toBeFocused();
+  });
+
   test('縦→横→縦の回転後も、必須操作がclip/横スクロールで隠れない', async ({ page }) => {
     await page.setViewportSize({ width: 412, height: 915 });
     await startBlankDrawing(page);
