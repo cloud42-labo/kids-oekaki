@@ -196,3 +196,126 @@ test('ぼかしのライブpreviewは、ドラッグが長くなっても1フレ
   // 明確に小さい、1点ぶんの増分に近い領域に収まっている。
   expect(medianLate).toBeLessThan(15000);
 });
+
+// OEK-05-S04-BUG03 収束再レビュー(PR #17)指摘への回帰テスト。
+// renderIncrementalBlurDraftは各フレームの新規区間をアキュムレーション
+// canvas(gctx)自身から読んで(=既に自分が書き込んだ結果を入力にして)
+// smudgeを計算していたため、連続するpointer移動がブラシ径より近い(=新規
+// 区間が前フレームの処理済み領域と重なる)と、同じ領域がフレームを重ねる
+// たびに繰り返し平均化されて過剰に混ざっていった。pointer-up時のcommitは
+// 常に確定済みレイヤーから1回だけ計算するため、この「重ね掛け」された
+// ライブpreviewはcommit結果と食い違い、pointer-upの瞬間に見た目が
+// 大きく変わって(スナップして)見えていた。
+// applyBlurSmudgeへsourceCtx(変更されない確定済みレイヤー)を渡し、
+// 近傍色のサンプリングを常にそこから行うことで、区間・呼び出し回数に
+// よらず計算結果が安定し、この「重ね掛け」による発散が起きないことを
+// 確認する。
+test('ブラシ径より近い間隔で重ねてなぞっても、ライブpreviewがcommit結果と食い違わない', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: /まっしろ/ }).click();
+  await page.getByRole('button', { name: /たて/ }).click();
+
+  const canvas = page.locator('.canvas-frame canvas');
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) return;
+  const dims = await page.evaluate(() => {
+    const c = document.querySelector('.canvas-frame canvas') as HTMLCanvasElement;
+    return { w: c.width, h: c.height };
+  });
+
+  const seamRatio = await paintRedBlueSeam(page, box, dims.h);
+  const seamY = box.y + box.height * seamRatio;
+  await page.getByRole('button', { name: 'ぼかし' }).click();
+
+  // ブラシ径(60px)よりずっと近い間隔(往復16px)で、同じ場所を繰り返し
+  // なぞる(pointerupせず)。
+  const centerX = box.x + box.width * 0.5;
+  const span = 8;
+  await page.mouse.move(centerX - span, seamY);
+  await page.mouse.down();
+  for (let i = 0; i < 60; i += 1) {
+    const x = i % 2 === 0 ? centerX + span : centerX - span;
+    await page.mouse.move(x, seamY);
+  }
+
+  const midDrag = await pixelAt(page, 0.5, seamRatio);
+  await page.mouse.up();
+  const committed = await pixelAt(page, 0.5, seamRatio);
+
+  const totalChannelDiff = Math.abs(midDrag.r - committed.r)
+    + Math.abs(midDrag.g - committed.g)
+    + Math.abs(midDrag.b - committed.b)
+    + Math.abs(midDrag.a - committed.a);
+  // 「重ね掛け」する旧実装ではここで約90(チャンネル合計)の食い違いが
+  // 生じていた。sourceCtxから読む実装では、同じ区間を何度処理しても
+  // 結果が安定するため、pointer-up前後でほぼ変わらないはず。
+  expect(totalChannelDiff).toBeLessThan(30);
+});
+
+// OEK-05-S04-BUG03 収束再レビュー(PR #17)指摘への回帰テスト。
+// 新規区間[fromIndex,currentCount)をそのまま1回のapplyBlurへ渡すと、
+// coalesced events等で1フレームに多数の(あるいは互いに遠い)点が
+// まとめて追加された場合、その区間のbounding boxがcanvas全体に近い
+// 大きさへ育ち得た。splitPointRangeIntoChunksによる空間的な分割
+// (実点間が離れている場合は補間点を挿入してから分割する)が、1回の
+// applyBlur呼び出しあたりの処理領域を上限以下に保つことを確認する。
+test('coalesced eventsのような大きな1回の移動でも、1回のsmudge計算が処理する領域は上限に収まる', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __chunkAreas: number[] }).__chunkAreas = [];
+    const original = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function (
+      this: CanvasRenderingContext2D,
+      sx: number,
+      sy: number,
+      sw: number,
+      sh: number,
+      ...rest: unknown[]
+    ) {
+      (window as unknown as { __chunkAreas: number[] }).__chunkAreas.push(sw * sh);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (original as any).call(this, sx, sy, sw, sh, ...rest);
+    };
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: /まっしろ/ }).click();
+  await page.getByRole('button', { name: /たて/ }).click();
+
+  const canvas = page.locator('.canvas-frame canvas');
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) return;
+
+  await setSize(page, 60);
+  await selectColor(page, '#e03131');
+  await page.getByRole('button', { name: 'ぼかし' }).click();
+
+  const y = box.y + box.height * 0.5;
+  const fromX = box.x + box.width * 0.05;
+  const toX = box.x + box.width * 0.95;
+
+  await page.evaluate(() => { (window as unknown as { __chunkAreas: number[] }).__chunkAreas = []; });
+  await page.mouse.move(fromX, y);
+  await page.mouse.down();
+  // 1回のmouse.move呼び出し(=1回のpointermoveイベント、新規点は1点)で
+  // canvas幅の9割を一気に移動する。低スペック端末でサンプリング間隔が
+  // 空いた場合や、Playwrightのようにイベントの座標間を補間しない環境を
+  // 想定した、意図的に極端な「遠い1点」の追加。
+  await page.mouse.move(toX, y);
+
+  // pointerupせずに読む: commit(pointer-up)は常に完全なpointsで1回だけ
+  // 全区間を計算するため無関係に大きくなり得る(このテストの対象外)。
+  // ここで見るのはライブpreview中(pointer-up前)の分割の効果。
+  const areas: number[] = await page.evaluate(
+    () => (window as unknown as { __chunkAreas: number[] }).__chunkAreas,
+  );
+  await page.mouse.up();
+
+  const maxArea = Math.max(...areas);
+  // 分割しない実装では、この移動1回で約80,800px²(canvas幅の9割ぶんの
+  // bounding box)を1回のsmudgeColors呼び出しで処理していた。
+  // maxExtent=300pxで分割する実装では、どのchunkもこれよりずっと
+  // 小さい領域に収まるはず。
+  expect(maxArea).toBeLessThan(50000);
+});
