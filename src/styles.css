@@ -35,6 +35,36 @@ button { -webkit-tap-highlight-color: transparent; }
 .orientation-swatch-portrait { width: 62px; height: 88px; }
 .orientation-swatch-landscape { width: 88px; height: 62px; }
 .back-link { margin-top: 20px; border: 0; background: transparent; color: #756b79; font-weight: 800; font-size: 16px; padding: 8px; }
+.template-card:disabled, .template-card-disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.template-card:disabled:active, .template-card-disabled:active { transform: none; }
+.preset-grid { grid-template-columns: repeat(3, 1fr); }
+.preset-card { min-height: 170px; gap: 6px; }
+.preset-thumbnail { width: 84px; height: auto; border-radius: 6px; box-shadow: 0 1px 4px rgba(51,45,56,.25); background: #fff; }
+.preset-card strong { font-size: 17px; }
+.preset-card small { font-size: 12px; }
+
+/* コマわりプリセット選択画面専用。6プリセット(760px以下では2列3段)+見出し+
+   もどるボタンの合計高さが、一般的なスマートフォンのビューポート高さ
+   (640〜720px程度)を超えることがある。他の画面(白紙/向き選択)は
+   .start-screen の place-items:center による縦中央寄せのままにしたいので、
+   ここではこの画面専用のクラスにだけ絞ってスクロールを許可する
+   （html/body/#rootのoverflow:hiddenはページ全体のバウンス防止用のまま変更しない。
+   .start-screen-presetが自分自身のoverflow-y:autoでスクロールコンテナになるため、
+   祖先のoverflow:hiddenとは競合しない）。
+   align-itemsをcenterのままにすると、はみ出し分が上下に均等に発生し、
+   ブラウザによっては上側にはみ出た分へスクロールで到達できない
+   （centerで発生する上方向オーバーフローがscrollTopの負値に相当し、
+   多くの環境で到達不能になる既知の問題）。startに変えることで、
+   はみ出しは常に下方向だけになり、先頭から下向きスクロールで
+   6プリセット全部と「かみをえらびなおす」ボタンに必ず到達できる。 */
+.start-screen-preset {
+  align-items: start;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.start-screen-preset .start-card {
+  margin: 24px auto;
+}
 
 /* Androidのedge-to-edge描画（targetSdk 35+で既定）では、WebViewがシステムバーの
    裏側まで含めた画面全体で描画されるため、ツールバー（先頭子要素）が
@@ -79,6 +109,23 @@ button { -webkit-tap-highlight-color: transparent; }
 .canvas-area { position: relative; min-width: 0; flex: 1; display: grid; place-items: center; padding: 14px; overflow: hidden; background: linear-gradient(135deg, #c7d3d9, #e8eef1); }
 .canvas-frame { position: relative; max-width: 100%; max-height: 100%; aspect-ratio: 800 / 1131; background: #fff; box-shadow: 0 12px 30px rgba(32,44,51,.25); }
 .canvas-frame canvas { display: block; width: 100%; height: 100%; touch-action: none; background: #fff; }
+/* OEK-05-S04-T03: LINEスタンプモード専用。このモードのcanvasはalpha:trueで
+   生成され、drawTemplate()は背景を一切塗らない(未描画部分はalpha=0のまま)。
+   このチェッカーボードはCSS背景として.canvas-frame/canvasのbox自体に置くだけの
+   表示専用の目印で、canvasのビットマップには一切書き込まれない。そのため
+   renderDocumentを直接呼ぶ別canvas(exportPng/サムネイル生成)には混ざらず、
+   透明PNG書き出しの結果には影響しない。 */
+.canvas-frame-transparent,
+.canvas-frame-transparent canvas {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #d3d8db 25%, transparent 25%),
+    linear-gradient(-45deg, #d3d8db 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d3d8db 75%),
+    linear-gradient(-45deg, transparent 75%, #d3d8db 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0px;
+}
 /* ミラー描画モードの中央軸ガイド。canvas要素には一切描画しない(DOM上のオーバーレイのみ)ため、
    PNG書き出し(renderDocumentを直接呼ぶ別canvas)には絶対に含まれない。 */
 .mirror-axis-guide { position: absolute; top: 0; left: 50%; width: 0; height: 100%; border-left: 3px dashed rgba(51,45,56,.55); pointer-events: none; z-index: 2; transform: translateX(-1.5px); }
@@ -103,6 +150,8 @@ button { -webkit-tap-highlight-color: transparent; }
 @media (max-width: 760px) {
   .template-grid { grid-template-columns: 1fr; }
   .template-card { min-height: 125px; }
+  .preset-grid { grid-template-columns: repeat(2, 1fr); }
+  .preset-card { min-height: 150px; }
   .layer-panel { width: 165px; flex-basis: 165px; }
   .toolbar { min-height: 84px; }
   .zoom-controls { top: 12px; right: 12px; }

@@ -114,3 +114,30 @@ test('鉛筆のライブpreviewは、ドラッグが長くなってもフレー�
   // ずっと少ない(実測: 新実装で約900回)。
   expect(callsMidDrag).toBeLessThan(2000);
 });
+
+test('鉛筆のライブpreviewは、pointerup後(確定後)と同じ濃さで表示される(描き直しで濃くならない)', async ({ page }) => {
+  // Codex指摘: 鉛筆はセグメントごとにalpha<1で描くため、増分previewが直近の
+  // セグメントを毎フレーム重ねて描き直すと、preview中だけ線が濃くなり、
+  // pointerupで確定した(各セグメントを1回だけ描く)見た目が急に薄く変わる。
+  const box = await setupPencilCanvas(page);
+  const yRatio = 0.3;
+  const y = box.y + box.height * yRatio;
+  const fromX = box.x + box.width * 0.15;
+  const toX = box.x + box.width * 0.85;
+  const steps = 60;
+
+  await page.mouse.move(fromX, y);
+  await page.mouse.down();
+  for (let i = 1; i <= steps; i += 1) {
+    await page.mouse.move(fromX + ((toX - fromX) * i) / steps, y);
+  }
+
+  // 終端の影響を避けるため、ストロークの中ほどを読む。
+  const beforeUp = await pixelAt(page, 0.4, yRatio);
+  await page.mouse.up();
+  const afterUp = await pixelAt(page, 0.4, yRatio);
+
+  expect(Math.abs(beforeUp.r - afterUp.r)).toBeLessThanOrEqual(2);
+  expect(Math.abs(beforeUp.g - afterUp.g)).toBeLessThanOrEqual(2);
+  expect(Math.abs(beforeUp.b - afterUp.b)).toBeLessThanOrEqual(2);
+});

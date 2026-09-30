@@ -5,7 +5,7 @@ import { ColorPalette } from './components/ColorPalette';
 import { LayerPanel } from './components/LayerPanel';
 import { StartScreen } from './components/StartScreen';
 import { Toolbar } from './components/Toolbar';
-import type { Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import type { MangaPresetKind, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
 import { useDrawingDocument } from './state/useDrawingDocument';
 import { deleteDrawingSession, listDrawingSessions, renameDrawingSession, saveDrawingSession } from './utils/documentStorage';
 import type { StoredDrawingSession } from './utils/documentStorage';
@@ -116,8 +116,8 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [started, activeSessionId, drawing.historySnapshot, settings]);
 
-  const start = (template: TemplateKind, orientation: Orientation) => {
-    drawing.reset(template, orientation);
+  const start = (template: TemplateKind, orientation: Orientation, mangaPreset?: MangaPresetKind) => {
+    drawing.reset(template, orientation, mangaPreset);
     setSettings(DEFAULT_SETTINGS);
     setMirrorEnabled(false);
     setActiveSessionId(crypto.randomUUID());
