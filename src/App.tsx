@@ -5,7 +5,7 @@ import { ColorPalette } from './components/ColorPalette';
 import { LayerPanel } from './components/LayerPanel';
 import { StartScreen } from './components/StartScreen';
 import { Toolbar } from './components/Toolbar';
-import type { ImageObject, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import type { ImageObject, MangaPresetKind, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
 import { preloadDocumentImages } from './engine/renderer';
 import type { ImageBox } from './engine/renderer';
 import { useDrawingDocument } from './state/useDrawingDocument';
@@ -30,6 +30,18 @@ function componentHex(value: number) {
   return Math.max(0, Math.min(255, value)).toString(16).padStart(2, '0');
 }
 
+// スタンプ作成UIを廃止したため、mode:'stamp'は選択不可能な状態になった。
+// しかしstamp UI廃止より前に保存されたセッションはsettings.mode:'stamp'を
+// そのまま持っている可能性があり、そのまま復元するとツールバーはどのボタン
+// も選択されて見えないのにCanvasStageのpointerdownは(stamp分岐が無くなった
+// ため)以前選んでいたbrush(消しゴム・ぼかし等の可能性がある)で描画して
+// しまう(Codexレビュー指摘)。復元時にmode:'stamp'を安全なbrushへ
+// 正規化する。
+function normalizeRestoredSettings(settings: ToolSettings): ToolSettings {
+  if (settings.mode !== 'stamp') return settings;
+  return { ...settings, mode: 'brush', brush: 'pen' };
+}
+
 export default function App() {
   const [started, setStarted] = useState(false);
   const [savedSessions, setSavedSessions] = useState<StoredDrawingSession[]>([]);
@@ -37,6 +49,10 @@ export default function App() {
   const [storageError, setStorageError] = useState<string>();
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // OEK-05-S04-BUG01: 下書き画像を含むPNG生成は数秒かかることがあり、その
+  // 間タップしても画面に反応が無いため連打されやすい。処理中はボタンを
+  // disabledにして多重実行を防ぐ。成功・失敗いずれもfinallyで必ず解除する。
+  const [isExportingPng, setIsExportingPng] = useState(false);
   const [recentColors, setRecentColors] = useState<string[]>(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(RECENT_COLORS_KEY) ?? '[]');
@@ -133,8 +149,8 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [started, activeSessionId, drawing.historySnapshot, settings]);
 
-  const start = (template: TemplateKind, orientation: Orientation) => {
-    drawing.reset(template, orientation);
+  const start = (template: TemplateKind, orientation: Orientation, mangaPreset?: MangaPresetKind) => {
+    drawing.reset(template, orientation, mangaPreset);
     setSettings(DEFAULT_SETTINGS);
     setSelectedImageId(null);
     setMirrorEnabled(false);
@@ -147,7 +163,7 @@ export default function App() {
     const session = savedSessions.find((item) => item.id === sessionId);
     if (!session) return;
     drawing.restoreHistory(session.history);
-    setSettings(session.settings ?? DEFAULT_SETTINGS);
+    setSettings(normalizeRestoredSettings(session.settings ?? DEFAULT_SETTINGS));
     setSelectedImageId(null);
     setMirrorEnabled(false);
     setActiveSession(session.id);
@@ -211,6 +227,26 @@ export default function App() {
     }
     const saved = await saveCurrent(true);
     if (saved) setStarted(false);
+  };
+
+  const handleExportPng = async () => {
+    if (isExportingPng) return;
+    setIsExportingPng(true);
+    // exportPng()の最初の一歩(renderDocumentでcanvasへ描く処理)は同期実行
+    // であり、下書き画像や長いストロークが多い作品では体感できるほど
+    // 時間がかかることがある。setIsExportingPng(true)の直後にそのまま
+    // exportPngへ入ると、ブラウザがdisabled/「保存中…」の再描画を行う
+    // 前にその同期処理が走ってしまい、処理中表示が意味をなさない
+    // (Codexレビュー指摘)。rAFを2回挟んで1描画フレーム分待ち、
+    // 「保存中…」が実際に画面へ反映されてからexportPngへ入る。
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    try {
+      await exportPng(drawing.document);
+    } finally {
+      setIsExportingPng(false);
+    }
   };
 
   const deleteSaved = async (sessionId: string) => {
@@ -288,7 +324,8 @@ export default function App() {
         onRedo={drawing.redo}
         onReturnToStart={() => void returnToStart()}
         onSaveDraft={() => void saveCurrent(true)}
-        onExportPng={() => void exportPng(drawing.document)}
+        onExportPng={() => void handleExportPng()}
+        isExportingPng={isExportingPng}
         onImportImage={(file) => void importImage(file)}
         hasDraftImage={hasDraftImage}
         saveState={saveState}
@@ -309,7 +346,6 @@ export default function App() {
           mirrorEnabled={mirrorEnabled}
           onCommitStroke={drawing.commitStroke}
           onCommitBlur={drawing.commitBlur}
-          onCommitStamp={drawing.commitStamp}
           onCommitMirroredStroke={drawing.commitMirroredStroke}
           selectedImageId={selectedImageId}
           onSelectImage={setSelectedImageId}

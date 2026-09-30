@@ -5,8 +5,36 @@ export const CANVAS_HEIGHT = 1131;
 // 端末を回転させても、これが変わらない限り描いた内容は回転・変形しない。
 export type Orientation = 'portrait' | 'landscape';
 
-export type TemplateKind = 'blank' | '4koma' | 'diary';
-export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
+// 'manga'が現行の漫画モード（複数の変則コマ割りプリセットから選択、mangaPresetで
+// どのプリセットかを保持する）。'4koma'と'diary'は移行前に保存された旧作品を
+// 読み込めるようにするためだけに残す後方互換値で、開始画面からは選べない
+// （OEK-05-S04-T04: 絵日記を廃止し、固定4コマだったものをプリセットの1つ
+// [MangaPresetKind = 'grid-4'] へ格上げした）。
+// 'line-sticker'はLINEスタンプモード（OEK-05-S04-T03）で、背景を描かず透明PNGにする。
+export type TemplateKind = 'blank' | 'manga' | '4koma' | 'diary' | 'line-sticker';
+
+// 漫画モードのコマ割りプリセット。少なくとも5種類の変則コマ割り
+// （+ 従来の固定4コマ相当の'grid-4'）を用意する。各プリセットの実際の
+// コマ矩形定義はsrc/domain/templates.tsのMANGA_PRESETSにある
+// （描画・サムネイル生成・エクスポートPNG・e2eテストが同じ定義を共有する）。
+export type MangaPresetKind =
+  | 'grid-4'
+  | 'one-large-two-small'
+  | 'three-rows-five-panels'
+  | 'left-large-right-stack'
+  | 'top-wide-bottom-split'
+  | 'center-large-surround';
+
+// LINEスタンプモード専用の判定。Owner確認(2026-09-26)のとおり、これは
+// 「白背景を検出して透明化する」のではなく「このテンプレートでは背景レイヤー
+// そのものを一切描画しない」という設計。未描画部分はcanvasをclearRectした
+// ままのalpha=0を保つ。ユーザーが実際に白色で描いた線・文字・スタンプは
+// 通常のsource-over描画でalpha=1の不透明な白として乗るため、透明化の対象には
+// ならない（対象はあくまで「描かれていない領域」だけ）。
+export function isTransparentBackgroundTemplate(template: TemplateKind): boolean {
+  return template === 'line-sticker';
+}
+export type BrushKind = 'pen' | 'pencil' | 'brush' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {
   x: number;
@@ -21,14 +49,27 @@ export type StrokeObject = {
   color: string;
   size: number;
   points: Point[];
+  // 鉛筆・筆のかすれ・抑揚はseededJitter(renderer.ts)でこの値から決定論的に
+  // 導出する。idではなくseedを使う理由: ミラー描画で生まれる反転strokeは
+  // Undo/Redo単位を揃えるため別idを持つ(mirrorStrokeAcrossAxis)が、
+  // 見た目の対称性を保つには元storkeと同じ揺らぎパターンを共有する必要が
+  // あるため。mirrorStrokeAcrossAxisは`...stroke`を展開するのでseedは
+  // 自動的に引き継がれる。
+  seed?: string;
 };
 
+// algorithmは新規ストロークではCanvasStage側で必ず'smudge'を設定する。
+// このPRより前に保存されたDocumentのBlurObjectにはこのフィールドが無く、
+// undefinedのまま読み込まれる。undefinedは明示的に「旧Gaussian blur実装」
+// を指すものとして扱い、既存作品の見た目・再エクスポート結果を変えない
+// (renderer.tsのapplyBlur参照)。
 export type BlurObject = {
   id: string;
   type: 'blur';
   size: number;
   strength: number;
   points: Point[];
+  algorithm?: 'gaussian' | 'smudge';
 };
 
 export type StampKind = 'heart' | 'star' | 'speech' | 'focus';
@@ -93,6 +134,10 @@ export type DrawingDocument = {
   height: number;
   orientation: Orientation;
   template: TemplateKind;
+  // template === 'manga' のときだけ意味を持つ。schema上は追加のoptionalフィールド
+  // なのでSCHEMA_VERSIONは上げない（旧保存データにこのフィールドが無くても
+  // documentStorage側は問題なく読める）。
+  mangaPreset?: MangaPresetKind;
   activeLayerId: string;
   layers: DrawingLayer[];
 };
@@ -122,7 +167,11 @@ export function mirrorStrokeAcrossAxis(stroke: StrokeObject, axisX: number): Str
   };
 }
 
-export function createInitialDocument(template: TemplateKind, orientation: Orientation = 'portrait'): DrawingDocument {
+export function createInitialDocument(
+  template: TemplateKind,
+  orientation: Orientation = 'portrait',
+  mangaPreset?: MangaPresetKind,
+): DrawingDocument {
   const sketchId = id();
   const colorId = id();
   const lineId = id();
@@ -137,6 +186,7 @@ export function createInitialDocument(template: TemplateKind, orientation: Orien
     height,
     orientation,
     template,
+    mangaPreset: template === 'manga' ? (mangaPreset ?? 'grid-4') : undefined,
     activeLayerId: lineId,
     layers: [
       { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [], kind: 'draft' },

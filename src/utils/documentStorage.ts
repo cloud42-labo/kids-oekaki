@@ -78,7 +78,14 @@ function upgradeSchemaVersion(value: StoredDrawingSession): StoredDrawingSession
 }
 
 function defaultName(history: DrawingHistory, savedAt: string) {
-  const template = history.present.template === '4koma' ? '4コマ' : history.present.template === 'diary' ? 'えにっき' : 'まっしろ';
+  const templateKind = history.present.template;
+  const template = templateKind === 'manga' || templateKind === '4koma'
+    ? 'まんが'
+    : templateKind === 'diary'
+      ? 'えにっき'
+      : templateKind === 'line-sticker'
+        ? 'LINEスタンプ'
+        : 'まっしろ';
   const date = new Date(savedAt);
   const stamp = Number.isNaN(date.getTime())
     ? ''

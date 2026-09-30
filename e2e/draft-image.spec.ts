@@ -32,7 +32,7 @@ async function startBlankDrawing(page: Page) {
   await page.goto('/');
   await page.getByRole('button', { name: /まっしろ/ }).click();
   await page.getByRole('button', { name: /たて/ }).click();
-  await expect(page.locator('.stamp-menu')).toBeVisible();
+  await expect(page.locator('.creative-toolbar')).toBeVisible();
 }
 
 function canvasLocator(page: Page) {
@@ -524,7 +524,7 @@ test.describe('draft layer image import', () => {
     await page.reload();
 
     await page.locator('.saved-work-open').first().click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // The seeded "line art" (blue stroke on せんが) survived the restore
     // untouched.
@@ -641,7 +641,7 @@ test.describe('draft layer image import', () => {
     await page.reload();
 
     await page.locator('.saved-work-open').first().click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // せんが (active at save time) is still active on resume, and the
     // seeded artwork on いろぬり survived untouched.
@@ -706,7 +706,7 @@ test.describe('draft layer image import', () => {
 
     await page.reload();
     await page.locator('.saved-work-open').first().click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // The live editor canvas has now registered its pending redraw for the
     // still-decoding src (CanvasStage's mount-time render effect). Saving
@@ -752,7 +752,7 @@ test.describe('draft layer image import', () => {
     await page.getByRole('button', { name: '開始画面へ戻る' }).click();
     await page.locator('.template-card', { hasText: 'まっしろ' }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // Give the delayed decode time to resolve. Against the pre-fix code,
     // the photo would appear here — inserted into (and about to be
@@ -807,7 +807,7 @@ test.describe('draft layer image import', () => {
 
     await page.reload();
     await page.locator('.saved-work-open').first().click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // Save again immediately, well inside the ~300ms delayed decode, so
     // saveDrawingSession's thumbnail generation races the still-decoding
@@ -904,7 +904,7 @@ test.describe('draft layer image import', () => {
     // not reset).
     await page.reload();
     await page.locator('.saved-work-open').first().click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
     await page.getByRole('button', { name: /保存/ }).click();
     await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
 
@@ -990,7 +990,7 @@ test.describe('draft layer image import', () => {
 
     await page.reload();
     await page.locator('.saved-work-open').first().click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // Trigger another save — saveDrawingSession's createThumbnailAsync
     // starts awaiting preloadDocumentImages() on the still-decoding restored
@@ -1101,7 +1101,7 @@ test.describe('draft layer image import', () => {
     await page.locator('input[type="file"]').setInputFiles(FIXTURE_PATH);
     await page.getByRole('button', { name: '開始画面へ戻る' }).click();
     await page.locator('.saved-work-row', { hasText: 'セッションB' }).locator('.saved-work-open').click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // Give the delayed decode time to resolve.
     await page.waitForTimeout(600);

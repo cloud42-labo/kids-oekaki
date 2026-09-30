@@ -26,8 +26,24 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  flex: 0 0 auto;
 }
+
+/* primary-toolsは道具の数が増えるほど幅を必要とするが、もどる/戻す/
+   やり直す/保存/PNGといった.creative-actions側は常に画面内で押せる
+   ことを優先する。primary-toolsだけをmin-width:0で縮小可能にしshrink分は
+   横スクロールで補うことで、道具が増えてもcreative-actionsが画面外へ
+   押し出されてクリップされる(=保存・PNGが押せなくなる)ことがないように
+   する(Codexレビュー指摘: 鉛筆・筆追加でツールバー全体が収まらない幅が
+   拡大した)。 */
+.primary-tools {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.primary-tools::-webkit-scrollbar { display: none; }
+
+.creative-actions { flex: 0 0 auto; }
 
 .compact-tool {
   min-width: 52px;
@@ -53,38 +69,6 @@
 }
 .compact-tool-icon { font-size: 20px; line-height: 1; }
 .compact-tool-label { font-size: 10px; font-weight: 700; white-space: nowrap; }
-
-.stamp-menu { position: relative; }
-.stamp-menu summary { list-style: none; }
-.stamp-menu summary::-webkit-details-marker { display: none; }
-.stamp-popover {
-  position: fixed;
-  width: 170px;
-  padding: 8px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  border: 1px solid #ced4da;
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
-  z-index: 100;
-}
-.stamp-popover button {
-  min-height: 48px;
-  border: 0;
-  border-radius: 8px;
-  background: #f1f3f5;
-  font-size: 12px;
-  font-weight: 700;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-}
-.stamp-popover button.active { background: #dbe4ff; color: #2948a5; }
-.stamp-popover button span { font-size: 18px; }
 
 .compact-size-control {
   width: 150px;
@@ -389,3 +373,64 @@
   .text-action { width: auto; padding: 0 7px; }
   .text-action span { display: inline; font-size: 10px; }
 }
+
+/* OEK-05-S04-BUG02: portraitでは.creative-toolbarを2段構成にする。
+   2026-09-26の実機確認で、縦持ちの狭い幅では上のcompact化ルールだけでは
+   ペン太さスライダーが常時操作できないことが分かった。.creative-toolbarは
+   flex-wrap:nowrapの1段構成のため、幅が足りないと太さスライダー・
+   Undo/Redo・保存・PNG・戻るが末尾へ押し出され、.toolbar（styles.css）の
+   overflow-x:autoによる横スクロールでしか到達できなくなる。個別ボタンの
+   幅調整では直せない構造的な問題のため、情報設計そのものを変える
+   （プロダクトオーナーの指示）。
+
+   1段目 = 描画ツール（primary-tools: ペン種類・スタンプ・ミラー）。
+   2段目 = 太さ・Undo/Redo・保存・PNG・戻る。太さ(compact-size-control)を
+   左に、戻る(toolbar-action-back)を右端に置く。
+
+   注意: creative-actions内の5ボタン（Undo/Redo/保存/PNG/戻る）の並び順は
+   ここではCSSのorderで制御しない。portrait/landscapeで求める視覚順が
+   異なる（landscape: 戻る→Undo→Redo→保存→PNG、portrait: 太さの次に
+   Undo→Redo→保存→PNG→戻る）ため、CSS orderで見た目だけ入れ替えると
+   DOM順（=キーボード/スイッチ操作のタブ順）が視覚順とずれる
+   （Codexレビュー指摘 PRRT_kwDOUiR8RM6mYwYx, 2回再発：comment_id
+   4114663614 → 4138644275）。かわりにToolbar.tsxのuseIsPortraitViewportが
+   実際のviewport向きを検知し、DOM順そのものを向きごとに並べ替えている
+   （DOM順=視覚順=タブ順を両方の向きで保証する）。このファイルに
+   creative-actionsの子要素へのorderを追加しないこと。
+
+   landscapeはこのブロックの対象外（orientation:portrait限定）。既存の
+   safe-area-inset対応（横持ちのpadding-left/right、790px container query）は
+   1段構成のまま変更しない。 */
+@media (orientation: portrait) {
+  .creative-toolbar {
+    flex-wrap: wrap;
+    align-content: flex-start;
+    height: auto;
+    min-height: auto;
+    row-gap: 6px;
+  }
+
+  .primary-tools {
+    order: 1;
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .compact-size-control {
+    order: 2;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .toolbar-spacer {
+    order: 3;
+  }
+
+  .creative-actions {
+    order: 4;
+    flex: 0 0 auto;
+  }
+}
+
