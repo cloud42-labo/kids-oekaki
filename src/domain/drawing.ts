@@ -5,7 +5,24 @@ export const CANVAS_HEIGHT = 1131;
 // 端末を回転させても、これが変わらない限り描いた内容は回転・変形しない。
 export type Orientation = 'portrait' | 'landscape';
 
-export type TemplateKind = 'blank' | '4koma' | 'diary';
+// 'manga'が現行の漫画モード（複数の変則コマ割りプリセットから選択、mangaPresetで
+// どのプリセットかを保持する）。'4koma'と'diary'は移行前に保存された旧作品を
+// 読み込めるようにするためだけに残す後方互換値で、開始画面からは選べない
+// （OEK-05-S04-T04: 絵日記を廃止し、固定4コマだったものをプリセットの1つ
+// [MangaPresetKind = 'grid-4'] へ格上げした）。
+export type TemplateKind = 'blank' | 'manga' | '4koma' | 'diary';
+
+// 漫画モードのコマ割りプリセット。少なくとも5種類の変則コマ割り
+// （+ 従来の固定4コマ相当の'grid-4'）を用意する。各プリセットの実際の
+// コマ矩形定義はsrc/domain/templates.tsのMANGA_PRESETSにある
+// （描画・サムネイル生成・エクスポートPNG・e2eテストが同じ定義を共有する）。
+export type MangaPresetKind =
+  | 'grid-4'
+  | 'one-large-two-small'
+  | 'three-rows-five-panels'
+  | 'left-large-right-stack'
+  | 'top-wide-bottom-split'
+  | 'center-large-surround';
 export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {
@@ -70,6 +87,10 @@ export type DrawingDocument = {
   height: number;
   orientation: Orientation;
   template: TemplateKind;
+  // template === 'manga' のときだけ意味を持つ。schema上は追加のoptionalフィールド
+  // なのでSCHEMA_VERSIONは上げない（旧保存データにこのフィールドが無くても
+  // documentStorage側は問題なく読める）。
+  mangaPreset?: MangaPresetKind;
   activeLayerId: string;
   layers: DrawingLayer[];
 };
@@ -99,7 +120,11 @@ export function mirrorStrokeAcrossAxis(stroke: StrokeObject, axisX: number): Str
   };
 }
 
-export function createInitialDocument(template: TemplateKind, orientation: Orientation = 'portrait'): DrawingDocument {
+export function createInitialDocument(
+  template: TemplateKind,
+  orientation: Orientation = 'portrait',
+  mangaPreset?: MangaPresetKind,
+): DrawingDocument {
   const sketchId = id();
   const colorId = id();
   const lineId = id();
@@ -114,6 +139,7 @@ export function createInitialDocument(template: TemplateKind, orientation: Orien
     height,
     orientation,
     template,
+    mangaPreset: template === 'manga' ? (mangaPreset ?? 'grid-4') : undefined,
     activeLayerId: lineId,
     layers: [
       { id: sketchId, name: 'したがき', visible: true, locked: false, opacity: 1, objects: [] },
