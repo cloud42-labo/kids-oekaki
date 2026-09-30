@@ -359,6 +359,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
         size: settings.size,
         strength: DEFAULT_BLUR_STRENGTH,
         points: [point],
+        algorithm: 'smudge',
       });
       return;
     }
