@@ -128,7 +128,7 @@ test.describe('後方互換: template === "4koma" の旧作品', () => {
     const openButton = page.locator('.saved-work-open').first();
     await expect(openButton).toBeVisible();
     await openButton.click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     const width = CANVAS_WIDTH;
     const height = CANVAS_HEIGHT;

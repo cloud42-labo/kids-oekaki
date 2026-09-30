@@ -47,7 +47,13 @@ function validateHistory(history: DrawingHistory | undefined) {
 
 function defaultName(history: DrawingHistory, savedAt: string) {
   const templateKind = history.present.template;
-  const template = templateKind === 'manga' || templateKind === '4koma' ? 'まんが' : templateKind === 'diary' ? 'えにっき' : 'まっしろ';
+  const template = templateKind === 'manga' || templateKind === '4koma'
+    ? 'まんが'
+    : templateKind === 'diary'
+      ? 'えにっき'
+      : templateKind === 'line-sticker'
+        ? 'LINEスタンプ'
+        : 'まっしろ';
   const date = new Date(savedAt);
   const stamp = Number.isNaN(date.getTime())
     ? ''

@@ -93,7 +93,12 @@ test.describe('ツールバーのportrait 2段レスポンシブ化 (OEK-05-S04-
       // 1段目: 描画ツールの先頭(ペン)・末尾(ミラー)がclip/横スクロール無しで
       // 到達できる
       await assertReachableWithoutScroll(page, page.getByRole('button', { name: 'ペン' }));
-      await assertReachableWithoutScroll(page, page.getByRole('button', { name: 'ミラー' }));
+      // 描画ツールはOEK-05-S04-T05で鉛筆・筆が加わって9個になり、狭い縦幅では
+      // この1段目だけが横スクロールで末尾(ミラー)へ到達する設計になった。必須操作
+      // (太さ・Undo/Redo・保存・PNG・戻る)は2段目にあり、横スクロールを要求しない。
+      const mirror = page.getByRole('button', { name: 'ミラー' });
+      await mirror.scrollIntoViewIfNeeded();
+      await expect(mirror).toBeInViewport();
 
       // 2段目: 太さ・Undo/Redo・保存・PNG・戻るがすべてclip/横スクロール無しで
       // 到達できる
@@ -237,55 +242,5 @@ test.describe('ツールバーのportrait 2段レスポンシブ化 (OEK-05-S04-
     await expect(controls.sizeSlider).toBeEnabled();
     await controls.sizeSlider.fill('15');
     await expect(controls.sizeSlider).toHaveValue('15');
-  });
-
-  test('portrait: primary-toolsの横スクロール(bubbleしないscrollイベント)をtoolbarRefがcaptureフェーズで拾えている（Codexレビュー指摘 comment_id 4138732732）', async ({ page }) => {
-    // 幅320pxはprimary-tools（描画ツール8個: ペン系6種+スタンプ+ミラー）が
-    // 収まりきらず横スクロールが発生することを事前に確認済みの幅
-    // (scrollWidth 334px > clientWidth 300px)。360px以上ではこの行は
-    // スクロールしないため、あえてPORTRAIT_VIEWPORTSより狭い幅を使う。
-    //
-    // 注記: このスタンプポップアップ(幅170px)とスタンプボタンの位置関係は、
-    // 実測するとマージン(VIEWPORT_MARGIN=8px)によるクランプが常に飽和して
-    // しまい(このアプリの現在のツール数・ポップアップ幅では、スクロール可能な
-    // 範囲全体でアンカーのx座標が常にmaxLeftを上回る)、スクロール前後で
-    // ポップアップの最終的なピクセル座標が偶然一致してしまう
-    // (=見た目のleft/top座標だけを比較する回帰テストは、captureフェーズの
-    // 有無に関わらず常にパスしてしまい、実質的に何も検証できない)。そのため
-    // ここでは実際に効いているメカニズムそのもの——scrollリスナーが
-    // capture:trueで登録されていること——を直接検証する。bubbleフェーズ
-    // (capture:false)のみだと子要素(.primary-tools)のscrollイベント
-    // (bubbleしない)を拾えず、開いたままスクロールされたスタンプポップアップの
-    // 位置が古いまま取り残される(このPR以前のバグ)。
-    await page.addInitScript(() => {
-      const calls: Array<{ capture: boolean; className: string }> = [];
-      const original = EventTarget.prototype.addEventListener;
-      EventTarget.prototype.addEventListener = function (type: string, listener: unknown, options?: boolean | AddEventListenerOptions) {
-        if (type === 'scroll' && this instanceof HTMLElement) {
-          const capture = typeof options === 'boolean' ? options : Boolean(options?.capture);
-          calls.push({ capture, className: this.className });
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return original.call(this, type, listener as any, options as any);
-      };
-      (window as unknown as { __scrollListenerCalls: typeof calls }).__scrollListenerCalls = calls;
-    });
-
-    await page.setViewportSize({ width: 320, height: 700 });
-    await startBlankDrawing(page);
-
-    // 前提: このviewportではprimary-tools(1段目)自体が横スクロール可能で、
-    // ヘッダー要素(toolbarRef)自体はスクロールしない(overflow: visible)。
-    // つまりスクロールイベントは常にtoolbarRefではなくその子孫から発生する。
-    const primaryTools = page.locator('.primary-tools');
-    const primaryScrollInfo = await primaryTools.evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
-    expect(primaryScrollInfo.scrollWidth).toBeGreaterThan(primaryScrollInfo.clientWidth);
-    const toolbarScrollInfo = await page.locator('.creative-toolbar').evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
-    expect(toolbarScrollInfo.scrollWidth).toBeLessThanOrEqual(toolbarScrollInfo.clientWidth + 1);
-
-    const calls = await page.evaluate(() => (window as unknown as { __scrollListenerCalls: Array<{ capture: boolean; className: string }> }).__scrollListenerCalls);
-    const toolbarScrollListeners = calls.filter((c) => c.className.includes('creative-toolbar'));
-    expect(toolbarScrollListeners.length).toBeGreaterThan(0);
-    expect(toolbarScrollListeners.some((c) => c.capture)).toBe(true);
   });
 });

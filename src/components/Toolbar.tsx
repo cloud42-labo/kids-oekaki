@@ -1,23 +1,16 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
-import type { BrushKind, StampKind, ToolSettings } from '../domain/drawing';
+import { useEffect, useState, type ReactElement } from 'react';
+import type { BrushKind, ToolSettings } from '../domain/drawing';
 
 const brushes: Array<{ key: BrushKind; icon: string; label: string }> = [
   { key: 'pen', icon: '✏️', label: 'ペン' },
+  { key: 'pencil', icon: '✎', label: '鉛筆' },
+  { key: 'brush', icon: '🖌️', label: '筆' },
   { key: 'marker', icon: '▰', label: 'マーカー' },
   { key: 'eraser', icon: '⌫', label: '消しゴム' },
   { key: 'blur', icon: '◌', label: 'ぼかし' },
   { key: 'rainbow', icon: '◐', label: '虹' },
   { key: 'neon', icon: '✦', label: 'ネオン' },
 ];
-
-const stamps: Array<{ key: StampKind; icon: string; label: string }> = [
-  { key: 'heart', icon: '♥', label: 'ハート' },
-  { key: 'star', icon: '★', label: '星' },
-  { key: 'speech', icon: '□', label: 'ふきだし' },
-  { key: 'focus', icon: '✺', label: '集中線' },
-];
-
-const VIEWPORT_MARGIN = 8;
 
 // OEK-05-S04-BUG02 review fix (2回目): CSSのorderだけで視覚順を変えると、
 // DOM順（=キーボード/スイッチ操作のタブ順）は変わらないため、portrait用に
@@ -70,16 +63,8 @@ type Props = {
 };
 
 export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, isExportingPng, saveState }: Props) {
-  const toolbarRef = useRef<HTMLElement>(null);
-  const stampMenuRef = useRef<HTMLDetailsElement>(null);
-  const stampPopoverRef = useRef<HTMLDivElement>(null);
-  const [stampPopoverPosition, setStampPopoverPosition] = useState({ top: 76, left: VIEWPORT_MARGIN });
   const isPortrait = useIsPortraitViewport();
   const setBrush = (brush: BrushKind) => setSettings({ ...settings, mode: 'brush', brush });
-  const setStamp = (stampKind: StampKind) => {
-    setSettings({ ...settings, mode: 'stamp', stampKind });
-    if (stampMenuRef.current) stampMenuRef.current.open = false;
-  };
   const saveLabel = saveState === 'saving' ? '保存中' : saveState === 'saved' ? '保存済' : saveState === 'error' ? '再保存' : '保存';
 
   const actionButtons = {
@@ -102,55 +87,8 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
     ),
   } satisfies Record<'back' | 'undo' | 'redo' | 'save' | 'png', ReactElement>;
 
-  const positionStampPopover = (details: HTMLDetailsElement) => {
-    if (!details.open) return;
-    const summary = details.querySelector('summary');
-    const popover = stampPopoverRef.current;
-    if (!summary || !popover) return;
-
-    const anchorRect = summary.getBoundingClientRect();
-    const popoverRect = popover.getBoundingClientRect();
-    const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
-    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-    const maxLeft = Math.max(VIEWPORT_MARGIN, viewportWidth - popoverRect.width - VIEWPORT_MARGIN);
-    const maxTop = Math.max(VIEWPORT_MARGIN, viewportHeight - popoverRect.height - VIEWPORT_MARGIN);
-    setStampPopoverPosition({
-      left: Math.min(Math.max(anchorRect.left, VIEWPORT_MARGIN), maxLeft),
-      top: Math.min(Math.max(anchorRect.bottom + 6, VIEWPORT_MARGIN), maxTop),
-    });
-  };
-
-  useEffect(() => {
-    const reposition = () => {
-      const details = stampMenuRef.current;
-      if (details?.open) positionStampPopover(details);
-    };
-    const toolbar = toolbarRef.current;
-    window.addEventListener('resize', reposition);
-    window.visualViewport?.addEventListener('resize', reposition);
-    // OEK-05-S04-BUG02 review fix: portraitの2段化で.primary-tools（1段目）が
-    // それ自体スクロール可能な子要素になった（狭幅では描画ツールが収まりきら
-    // ず横スクロールする）。scrollイベントはbubbleしないため、toolbarRef
-    // (ヘッダー要素自体)にbubbleフェーズで貼ったリスナーでは、子要素である
-    // .primary-toolsのスクロールを拾えず、スタンプ選択メニューを開いたまま
-    // 1段目を横スクロールするとポップアップの位置が古いまま取り残される
-    // （Codexレビュー指摘 comment_id 4138732732, AGENTS.md L17-19: タッチでの
-    // 実際の挙動はAIレビューだけで完結せず実機確認が必要）。captureフェーズで
-    // 登録すると、bubbleしないscrollイベントも子孫要素から拾えるため、
-    // .primary-tools以外の将来のスクロール可能な子要素にも対応できる。
-    // (同じ修正が並行セッションでも入り、マージ時に同一内容へ収束した。
-    // 回帰テストはe2e/toolbar-two-row.spec.tsとe2e/stamp-popover.spec.ts
-    // の両方に別アプローチで追加されている。)
-    toolbar?.addEventListener('scroll', reposition, { passive: true, capture: true });
-    return () => {
-      window.removeEventListener('resize', reposition);
-      window.visualViewport?.removeEventListener('resize', reposition);
-      toolbar?.removeEventListener('scroll', reposition, { capture: true });
-    };
-  }, []);
-
   return (
-    <header ref={toolbarRef} className="toolbar creative-toolbar" aria-label="描画ツール">
+    <header className="toolbar creative-toolbar" aria-label="描画ツール">
       <div className="primary-tools" aria-label="ペンの種類">
         {brushes.map((brush) => (
           <button
@@ -164,20 +102,6 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
             <span className="compact-tool-label">{brush.label}</span>
           </button>
         ))}
-
-        <details ref={stampMenuRef} className="stamp-menu" onToggle={(event) => positionStampPopover(event.currentTarget)}>
-          <summary className={settings.mode === 'stamp' ? 'compact-tool active' : 'compact-tool'} title="スタンプ">
-            <span className="compact-tool-icon">◆</span>
-            <span className="compact-tool-label">スタンプ</span>
-          </summary>
-          <div ref={stampPopoverRef} className="stamp-popover" style={stampPopoverPosition}>
-            {stamps.map((stamp) => (
-              <button key={stamp.key} className={settings.mode === 'stamp' && settings.stampKind === stamp.key ? 'active' : ''} onClick={() => setStamp(stamp.key)}>
-                <span>{stamp.icon}</span>{stamp.label}
-              </button>
-            ))}
-          </div>
-        </details>
 
         <button
           type="button"

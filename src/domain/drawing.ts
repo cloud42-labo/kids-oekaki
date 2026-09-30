@@ -10,7 +10,8 @@ export type Orientation = 'portrait' | 'landscape';
 // 読み込めるようにするためだけに残す後方互換値で、開始画面からは選べない
 // （OEK-05-S04-T04: 絵日記を廃止し、固定4コマだったものをプリセットの1つ
 // [MangaPresetKind = 'grid-4'] へ格上げした）。
-export type TemplateKind = 'blank' | 'manga' | '4koma' | 'diary';
+// 'line-sticker'はLINEスタンプモード（OEK-05-S04-T03）で、背景を描かず透明PNGにする。
+export type TemplateKind = 'blank' | 'manga' | '4koma' | 'diary' | 'line-sticker';
 
 // 漫画モードのコマ割りプリセット。少なくとも5種類の変則コマ割り
 // （+ 従来の固定4コマ相当の'grid-4'）を用意する。各プリセットの実際の
@@ -23,7 +24,17 @@ export type MangaPresetKind =
   | 'left-large-right-stack'
   | 'top-wide-bottom-split'
   | 'center-large-surround';
-export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
+
+// LINEスタンプモード専用の判定。Owner確認(2026-09-26)のとおり、これは
+// 「白背景を検出して透明化する」のではなく「このテンプレートでは背景レイヤー
+// そのものを一切描画しない」という設計。未描画部分はcanvasをclearRectした
+// ままのalpha=0を保つ。ユーザーが実際に白色で描いた線・文字・スタンプは
+// 通常のsource-over描画でalpha=1の不透明な白として乗るため、透明化の対象には
+// ならない（対象はあくまで「描かれていない領域」だけ）。
+export function isTransparentBackgroundTemplate(template: TemplateKind): boolean {
+  return template === 'line-sticker';
+}
+export type BrushKind = 'pen' | 'pencil' | 'brush' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {
   x: number;
@@ -38,14 +49,27 @@ export type StrokeObject = {
   color: string;
   size: number;
   points: Point[];
+  // 鉛筆・筆のかすれ・抑揚はseededJitter(renderer.ts)でこの値から決定論的に
+  // 導出する。idではなくseedを使う理由: ミラー描画で生まれる反転strokeは
+  // Undo/Redo単位を揃えるため別idを持つ(mirrorStrokeAcrossAxis)が、
+  // 見た目の対称性を保つには元storkeと同じ揺らぎパターンを共有する必要が
+  // あるため。mirrorStrokeAcrossAxisは`...stroke`を展開するのでseedは
+  // 自動的に引き継がれる。
+  seed?: string;
 };
 
+// algorithmは新規ストロークではCanvasStage側で必ず'smudge'を設定する。
+// このPRより前に保存されたDocumentのBlurObjectにはこのフィールドが無く、
+// undefinedのまま読み込まれる。undefinedは明示的に「旧Gaussian blur実装」
+// を指すものとして扱い、既存作品の見た目・再エクスポート結果を変えない
+// (renderer.tsのapplyBlur参照)。
 export type BlurObject = {
   id: string;
   type: 'blur';
   size: number;
   strength: number;
   points: Point[];
+  algorithm?: 'gaussian' | 'smudge';
 };
 
 export type StampKind = 'heart' | 'star' | 'speech' | 'focus';

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { BlurObject, DrawingDocument, Point, StampObject, StrokeObject, ToolSettings } from '../domain/drawing';
-import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, Point, StrokeObject, ToolSettings } from '../domain/drawing';
+import { DEFAULT_BLUR_STRENGTH, isTransparentBackgroundTemplate, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
 import { renderDocument } from '../engine/renderer';
 
 type Props = {
@@ -9,7 +9,6 @@ type Props = {
   mirrorEnabled: boolean;
   onCommitStroke: (stroke: StrokeObject) => void;
   onCommitBlur: (blur: BlurObject) => void;
-  onCommitStamp: (stamp: StampObject) => void;
   onCommitMirroredStroke: (stroke: StrokeObject, mirroredStroke: StrokeObject) => void;
 };
 
@@ -54,10 +53,22 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // destination-out等でアルファが必須のため対象外、renderer.ts側は変更していない）。
 // 低スペックAndroid GPUでのコンポジットコストは、ペン入力のもたつき
 // （OEK-05-S03-BUG03）の一因になり得るため、低リスクな改善として適用する。
-const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d', { alpha: false }) ?? null;
+//
+// OEK-05-S04-T03: LINEスタンプモードはこの前提が崩れる唯一の例外。
+// drawTemplate()は背景を全く塗らない(isTransparentBackgroundTemplate)ため、
+// このメインcanvas自体がアルファチャンネルを持てないと未描画部分を透明として
+// 表示できない。このモードに限り`alpha: true`を渡し、CSS側のチェッカーボード
+// (styles.cssの.canvas-frame-transparent)がその透明部分から透けて見えるように
+// する。getContext()の属性は最初の呼び出しでcanvas要素ごとに確定するため、
+// document.template(=セッション開始時に決まり、以後変わらない)から一度だけ
+// 判定すれば呼び出し順に関わらず一貫する。
+const get2dContext = (canvas: HTMLCanvasElement | null, alpha: boolean) => canvas?.getContext('2d', { alpha }) ?? null;
 
-export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitStamp, onCommitMirroredStroke }: Props) {
+export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitMirroredStroke }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // documentは1セッション中テンプレートが変わらない(startで作り直すとCanvasStage
+  // 自体がApp.tsx側でアンマウント/リマウントされる)ため、ここで固定してよい。
+  const canvasHasAlpha = isTransparentBackgroundTemplate(document.template);
   const frameRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
   const [draft, setDraft] = useState<StrokeObject | BlurObject | null>(null);
@@ -80,7 +91,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
   const [viewport, setViewport] = useState<Viewport>(IDENTITY_VIEWPORT);
   const touchPoints = useRef<Map<number, ScreenPoint>>(new Map());
   const pinchRef = useRef<PinchState | null>(null);
-  const pendingStampRef = useRef<{ pointerId: number; stamp: StampObject } | null>(null);
 
   const activeLayer = useMemo(
     () => document.layers.find((layer) => layer.id === document.activeLayerId),
@@ -95,7 +105,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const ctx = get2dContext(canvas);
+    const ctx = get2dContext(canvas, canvasHasAlpha);
     if (!canvas || !ctx) return;
     const draftObjects = draft ? (mirrorDraft ? [draft, mirrorDraft] : [draft]) : null;
     renderDocument(ctx, document, draftObjects);
@@ -126,7 +136,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   const restoreCommittedDocument = () => {
     const canvas = canvasRef.current;
-    const ctx = get2dContext(canvas);
+    const ctx = get2dContext(canvas, canvasHasAlpha);
     if (!canvas || !ctx) return;
     renderDocument(ctx, document, null);
   };
@@ -153,10 +163,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     }
     setDraft(null);
     setMirrorDraft(null);
-  };
-
-  const cancelPendingStamp = () => {
-    pendingStampRef.current = null;
   };
 
   const captureActiveTouches = (canvas: HTMLCanvasElement) => {
@@ -235,8 +241,10 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   // OEK-05-S03-BUG03: 高速パス（RAFバッチ処理によるインクリメンタル描画）は
   // 'pen'ブラシに限定する。一度'eraser'にも拡張したが、この高速パスは
-  // get2dContext()経由でメイン表示用canvas（{alpha:false}、レイヤー合成を
-  // 経由しない1枚のflattenedな不透明canvas）へ直接destination-outを描く。
+  // get2dContext()経由でメイン表示用canvas（通常{alpha:false}、レイヤー合成を
+  // 経由しない1枚のflattenedなcanvas。LINEスタンプモードだけ透明PNG書き出しの
+  // ためcanvasHasAlpha=trueになるが、この段落の議論自体はそちらでも変わらない）
+  // へ直接destination-outを描く。
   // alpha:falseのcanvasはアルファチャンネルを保持できないため、消しゴムで
   // 作られるはずの透明部分を表現できず、ストローク中（pointer-up前）だけ
   // 黒などの不正な色で表示される回帰を生んだ（Codexレビュー指摘P1、
@@ -271,7 +279,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
   };
 
   const drawLiveDot = (stroke: StrokeObject, point: Point) => {
-    const ctx = get2dContext(canvasRef.current);
+    const ctx = get2dContext(canvasRef.current, canvasHasAlpha);
     if (!ctx) return;
     ctx.save();
     configureLiveStrokeContext(ctx, stroke);
@@ -283,7 +291,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   const drawLiveSegments = (stroke: StrokeObject, points: Point[]) => {
     if (!points.length) return;
-    const ctx = get2dContext(canvasRef.current);
+    const ctx = get2dContext(canvasRef.current, canvasHasAlpha);
     const previous = stroke.points[stroke.points.length - 1];
     if (!ctx || !previous) return;
 
@@ -330,25 +338,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     if (shouldIgnorePointer(event) || !activeLayer || activeLayer.locked || !activeLayer.visible) return;
     event.preventDefault();
 
-    if (settings.mode === 'stamp') {
-      const point = pointFromEvent(event);
-      const stamp: StampObject = {
-        id: crypto.randomUUID(),
-        type: 'stamp',
-        stamp: settings.stampKind,
-        x: point.x,
-        y: point.y,
-        size: STAMP_SIZE,
-        color: settings.color,
-      };
-      if (event.pointerType === 'touch') {
-        pendingStampRef.current = { pointerId: event.pointerId, stamp };
-      } else {
-        onCommitStamp(stamp);
-      }
-      return;
-    }
-
     activePointerId.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
@@ -359,6 +348,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
         size: settings.size,
         strength: DEFAULT_BLUR_STRENGTH,
         points: [point],
+        algorithm: 'smudge',
       });
       return;
     }
@@ -370,6 +360,9 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       color: settings.color,
       size: settings.size,
       points: [point],
+      // ミラー描画時、反転strokeはmirrorStrokeAcrossAxisで別idを持つが
+      // seedはそのまま引き継ぐため、鉛筆・筆のかすれ・抑揚が左右対称になる。
+      seed: crypto.randomUUID(),
     };
 
     if (canUseLiveStroke(stroke)) {
@@ -483,7 +476,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       if (touchPoints.current.size === 2) {
         event.preventDefault();
         cancelActiveDraw();
-        cancelPendingStamp();
         captureActiveTouches(event.currentTarget);
         beginPinch();
         return;
@@ -504,7 +496,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     move(event);
   };
 
-  const endTouch = (event: React.PointerEvent<HTMLCanvasElement>, commit: boolean) => {
+  const endTouch = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (event.pointerType !== 'touch') return false;
     touchPoints.current.delete(event.pointerId);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -514,28 +506,27 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       if (touchPoints.current.size < 2) endPinch();
       return true;
     }
-    if (pendingStampRef.current?.pointerId === event.pointerId) {
-      const pending = pendingStampRef.current;
-      pendingStampRef.current = null;
-      if (commit) onCommitStamp(pending.stamp);
-      return true;
-    }
     return false;
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!endTouch(event, true)) stop(event);
+    if (!endTouch(event)) stop(event);
   };
 
   const handlePointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!endTouch(event, false)) stop(event);
+    if (!endTouch(event)) stop(event);
   };
 
   return (
     <div className="canvas-area">
       <div
         ref={frameRef}
-        className="canvas-frame"
+        // OEK-05-S04-T03: LINEスタンプモードでは.canvas-frame-transparentの
+        // チェッカーボードCSS（styles.css）が、canvasの透明ピクセル(alpha=0の
+        // 未描画部分)の背後から見える。これは表示専用のオーバーレイであり、
+        // drawTemplate()自体はこの模様を一切描かないため、exportPng/サムネイル
+        // 生成には混ざらない(同じrenderDocumentを使う別canvasにはCSS背景が無い)。
+        className={`canvas-frame${canvasHasAlpha ? ' canvas-frame-transparent' : ''}`}
         style={{
           aspectRatio: `${document.width} / ${document.height}`,
           transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,

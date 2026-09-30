@@ -103,12 +103,12 @@ function panelRectPx(panel: { x: number; y: number; w: number; h: number }, widt
 const TOP_WIDE_BOTTOM_SPLIT = MANGA_PRESETS.find((p) => p.key === 'top-wide-bottom-split')!;
 
 test.describe('開始画面: 白紙/漫画/LINEスタンプへの整理', () => {
-  test('絵日記の選択肢が無く、白紙/まんが/LINEスタンプ(近日公開)の3択になっている', async ({ page }) => {
+  test('絵日記の選択肢が無く、白紙/まんが/LINEスタンプの3択になっている（LINEスタンプは選べる）', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: /まっしろ/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /^まんが/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /LINEスタンプ/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /LINEスタンプ/ })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /LINEスタンプ/ })).toBeEnabled();
     await expect(page.getByRole('button', { name: /えにっき/ })).toHaveCount(0);
   });
 
@@ -149,7 +149,7 @@ test.describe('漫画モード: 変則コマ割りプリセット', () => {
     const group = await goToMangaPresetPicker(page);
     await group.getByRole('button', { name: labelPattern(TOP_WIDE_BOTTOM_SPLIT.label) }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     const width = CANVAS_WIDTH;
     const height = CANVAS_HEIGHT;
@@ -188,7 +188,7 @@ test.describe('漫画モード: 変則コマ割りプリセット', () => {
     const group = await goToMangaPresetPicker(page);
     await group.getByRole('button', { name: labelPattern(MANGA_PRESETS[0].label) }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     const downloadPromise = page.waitForEvent('download');
     await page.getByRole('button', { name: /PNG/ }).click();
@@ -200,7 +200,7 @@ test.describe('漫画モード: 変則コマ割りプリセット', () => {
     const group = await goToMangaPresetPicker(page);
     await group.getByRole('button', { name: labelPattern(TOP_WIDE_BOTTOM_SPLIT.label) }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     const width = CANVAS_WIDTH;
     const height = CANVAS_HEIGHT;
@@ -218,7 +218,7 @@ test.describe('漫画モード: 変則コマ割りプリセット', () => {
     const openButton = page.locator('.saved-work-open').first();
     await expect(openButton).toBeVisible();
     await openButton.click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     await expect.poll(async () => isDarkLine(await readPixel(page, borderRatio.x, borderRatio.y))).toBe(true);
     expect(isDarkLine(await readPixel(page, insideBottomLeftRatio.x, insideBottomLeftRatio.y))).toBe(true);
