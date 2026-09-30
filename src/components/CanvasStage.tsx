@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { BlurObject, DrawingDocument, Point, StampObject, StrokeObject, ToolSettings } from '../domain/drawing';
-import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE, isTransparentBackgroundTemplate, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, Point, StrokeObject, ToolSettings } from '../domain/drawing';
+import { DEFAULT_BLUR_STRENGTH, isTransparentBackgroundTemplate, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
 import { renderDocument } from '../engine/renderer';
 
 type Props = {
@@ -9,7 +9,6 @@ type Props = {
   mirrorEnabled: boolean;
   onCommitStroke: (stroke: StrokeObject) => void;
   onCommitBlur: (blur: BlurObject) => void;
-  onCommitStamp: (stamp: StampObject) => void;
   onCommitMirroredStroke: (stroke: StrokeObject, mirroredStroke: StrokeObject) => void;
 };
 
@@ -65,7 +64,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // 判定すれば呼び出し順に関わらず一貫する。
 const get2dContext = (canvas: HTMLCanvasElement | null, alpha: boolean) => canvas?.getContext('2d', { alpha }) ?? null;
 
-export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitStamp, onCommitMirroredStroke }: Props) {
+export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitMirroredStroke }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // documentは1セッション中テンプレートが変わらない(startで作り直すとCanvasStage
   // 自体がApp.tsx側でアンマウント/リマウントされる)ため、ここで固定してよい。
@@ -92,7 +91,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
   const [viewport, setViewport] = useState<Viewport>(IDENTITY_VIEWPORT);
   const touchPoints = useRef<Map<number, ScreenPoint>>(new Map());
   const pinchRef = useRef<PinchState | null>(null);
-  const pendingStampRef = useRef<{ pointerId: number; stamp: StampObject } | null>(null);
 
   const activeLayer = useMemo(
     () => document.layers.find((layer) => layer.id === document.activeLayerId),
@@ -165,10 +163,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     }
     setDraft(null);
     setMirrorDraft(null);
-  };
-
-  const cancelPendingStamp = () => {
-    pendingStampRef.current = null;
   };
 
   const captureActiveTouches = (canvas: HTMLCanvasElement) => {
@@ -344,25 +338,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     if (shouldIgnorePointer(event) || !activeLayer || activeLayer.locked || !activeLayer.visible) return;
     event.preventDefault();
 
-    if (settings.mode === 'stamp') {
-      const point = pointFromEvent(event);
-      const stamp: StampObject = {
-        id: crypto.randomUUID(),
-        type: 'stamp',
-        stamp: settings.stampKind,
-        x: point.x,
-        y: point.y,
-        size: STAMP_SIZE,
-        color: settings.color,
-      };
-      if (event.pointerType === 'touch') {
-        pendingStampRef.current = { pointerId: event.pointerId, stamp };
-      } else {
-        onCommitStamp(stamp);
-      }
-      return;
-    }
-
     activePointerId.current = event.pointerId;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
@@ -385,6 +360,9 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       color: settings.color,
       size: settings.size,
       points: [point],
+      // ミラー描画時、反転strokeはmirrorStrokeAcrossAxisで別idを持つが
+      // seedはそのまま引き継ぐため、鉛筆・筆のかすれ・抑揚が左右対称になる。
+      seed: crypto.randomUUID(),
     };
 
     if (canUseLiveStroke(stroke)) {
@@ -498,7 +476,6 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       if (touchPoints.current.size === 2) {
         event.preventDefault();
         cancelActiveDraw();
-        cancelPendingStamp();
         captureActiveTouches(event.currentTarget);
         beginPinch();
         return;
@@ -519,7 +496,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     move(event);
   };
 
-  const endTouch = (event: React.PointerEvent<HTMLCanvasElement>, commit: boolean) => {
+  const endTouch = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (event.pointerType !== 'touch') return false;
     touchPoints.current.delete(event.pointerId);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -529,21 +506,15 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
       if (touchPoints.current.size < 2) endPinch();
       return true;
     }
-    if (pendingStampRef.current?.pointerId === event.pointerId) {
-      const pending = pendingStampRef.current;
-      pendingStampRef.current = null;
-      if (commit) onCommitStamp(pending.stamp);
-      return true;
-    }
     return false;
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!endTouch(event, true)) stop(event);
+    if (!endTouch(event)) stop(event);
   };
 
   const handlePointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!endTouch(event, false)) stop(event);
+    if (!endTouch(event)) stop(event);
   };
 
   return (

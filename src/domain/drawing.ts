@@ -34,7 +34,7 @@ export type MangaPresetKind =
 export function isTransparentBackgroundTemplate(template: TemplateKind): boolean {
   return template === 'line-sticker';
 }
-export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
+export type BrushKind = 'pen' | 'pencil' | 'brush' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {
   x: number;
@@ -49,6 +49,13 @@ export type StrokeObject = {
   color: string;
   size: number;
   points: Point[];
+  // 鉛筆・筆のかすれ・抑揚はseededJitter(renderer.ts)でこの値から決定論的に
+  // 導出する。idではなくseedを使う理由: ミラー描画で生まれる反転strokeは
+  // Undo/Redo単位を揃えるため別idを持つ(mirrorStrokeAcrossAxis)が、
+  // 見た目の対称性を保つには元storkeと同じ揺らぎパターンを共有する必要が
+  // あるため。mirrorStrokeAcrossAxisは`...stroke`を展開するのでseedは
+  // 自動的に引き継がれる。
+  seed?: string;
 };
 
 // algorithmは新規ストロークではCanvasStage側で必ず'smudge'を設定する。
