@@ -46,6 +46,10 @@ export default function App() {
   const [storageError, setStorageError] = useState<string>();
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // OEK-05-S04-BUG01: 下書き画像を含むPNG生成は数秒かかることがあり、その
+  // 間タップしても画面に反応が無いため連打されやすい。処理中はボタンを
+  // disabledにして多重実行を防ぐ。成功・失敗いずれもfinallyで必ず解除する。
+  const [isExportingPng, setIsExportingPng] = useState(false);
   const [recentColors, setRecentColors] = useState<string[]>(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(RECENT_COLORS_KEY) ?? '[]');
@@ -141,6 +145,26 @@ export default function App() {
     if (saved) setStarted(false);
   };
 
+  const handleExportPng = async () => {
+    if (isExportingPng) return;
+    setIsExportingPng(true);
+    // exportPng()の最初の一歩(renderDocumentでcanvasへ描く処理)は同期実行
+    // であり、下書き画像や長いストロークが多い作品では体感できるほど
+    // 時間がかかることがある。setIsExportingPng(true)の直後にそのまま
+    // exportPngへ入ると、ブラウザがdisabled/「保存中…」の再描画を行う
+    // 前にその同期処理が走ってしまい、処理中表示が意味をなさない
+    // (Codexレビュー指摘)。rAFを2回挟んで1描画フレーム分待ち、
+    // 「保存中…」が実際に画面へ反映されてからexportPngへ入る。
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    try {
+      await exportPng(drawing.document);
+    } finally {
+      setIsExportingPng(false);
+    }
+  };
+
   const deleteSaved = async (sessionId: string) => {
     try {
       await deleteDrawingSession(sessionId);
@@ -216,7 +240,8 @@ export default function App() {
         onRedo={drawing.redo}
         onReturnToStart={() => void returnToStart()}
         onSaveDraft={() => void saveCurrent(true)}
-        onExportPng={() => void exportPng(drawing.document)}
+        onExportPng={() => void handleExportPng()}
+        isExportingPng={isExportingPng}
         saveState={saveState}
       />
       {storageError && <div className="save-error-banner" role="alert">⚠️ {storageError}</div>}
