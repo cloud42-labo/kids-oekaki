@@ -125,11 +125,21 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
     const toolbar = toolbarRef.current;
     window.addEventListener('resize', reposition);
     window.visualViewport?.addEventListener('resize', reposition);
-    toolbar?.addEventListener('scroll', reposition, { passive: true });
+    // OEK-05-S04-BUG02 review fix: portraitの2段化で.primary-tools（1段目）が
+    // それ自体スクロール可能な子要素になった（狭幅では描画ツールが収まりきら
+    // ず横スクロールする）。scrollイベントはbubbleしないため、toolbarRef
+    // (ヘッダー要素自体)にbubbleフェーズで貼ったリスナーでは、子要素である
+    // .primary-toolsのスクロールを拾えず、スタンプ選択メニューを開いたまま
+    // 1段目を横スクロールするとポップアップの位置が古いまま取り残される
+    // （Codexレビュー指摘 comment_id 4138732732, AGENTS.md L17-19: タッチでの
+    // 実際の挙動はAIレビューだけで完結せず実機確認が必要）。captureフェーズで
+    // 登録すると、bubbleしないscrollイベントも子孫要素から拾えるため、
+    // .primary-tools以外の将来のスクロール可能な子要素にも対応できる。
+    toolbar?.addEventListener('scroll', reposition, { passive: true, capture: true });
     return () => {
       window.removeEventListener('resize', reposition);
       window.visualViewport?.removeEventListener('resize', reposition);
-      toolbar?.removeEventListener('scroll', reposition);
+      toolbar?.removeEventListener('scroll', reposition, { capture: true });
     };
   }, []);
 
