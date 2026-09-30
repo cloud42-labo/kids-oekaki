@@ -1,3 +1,4 @@
+import { useEffect, useState, type ReactElement } from 'react';
 import type { BrushKind, ToolSettings } from '../domain/drawing';
 
 const brushes: Array<{ key: BrushKind; icon: string; label: string }> = [
@@ -10,6 +11,38 @@ const brushes: Array<{ key: BrushKind; icon: string; label: string }> = [
   { key: 'rainbow', icon: '◐', label: '虹' },
   { key: 'neon', icon: '✦', label: 'ネオン' },
 ];
+
+// OEK-05-S04-BUG02 review fix (2回目): CSSのorderだけで視覚順を変えると、
+// DOM順（=キーボード/スイッチ操作のタブ順）は変わらないため、portrait用に
+// orderを使えばlandscapeのタブ順がずれ、landscape用に使えばportraitの
+// タブ順がずれるというイタチごっこになった（Codexレビュー指摘
+// PRRT_kwDOUiR8RM6mYwYx, comment_id 4138644275）。
+// portrait/landscapeで求める視覚順そのものが異なる
+// （landscape: 戻る→Undo→Redo→保存→PNG、portrait: Undo→Redo→保存→PNG→戻る）
+// ため、単一の静的なDOM順とCSS orderの組み合わせでは両方のタブ順を同時に
+// 正しくできない。実際の画面の向き（viewport orientation）をJSで検知し、
+// DOM順そのものを向きごとに並べ替えることで、どちらの向きでも
+// 「DOM順 = 視覚順 = タブ順」を保証する。
+function useIsPortraitViewport(): boolean {
+  const getMatches = () => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(orientation: portrait)').matches : true);
+  const [isPortrait, setIsPortrait] = useState(getMatches);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(orientation: portrait)');
+    const handleChange = () => setIsPortrait(mql.matches);
+    handleChange();
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', handleChange);
+      return () => mql.removeEventListener('change', handleChange);
+    }
+    // 古いSafari向けフォールバック
+    mql.addListener(handleChange);
+    return () => mql.removeListener(handleChange);
+  }, []);
+
+  return isPortrait;
+}
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -30,8 +63,29 @@ type Props = {
 };
 
 export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, isExportingPng, saveState }: Props) {
+  const isPortrait = useIsPortraitViewport();
   const setBrush = (brush: BrushKind) => setSettings({ ...settings, mode: 'brush', brush });
   const saveLabel = saveState === 'saving' ? '保存中' : saveState === 'saved' ? '保存済' : saveState === 'error' ? '再保存' : '保存';
+
+  const actionButtons = {
+    back: (
+      <button key="back" className="text-action toolbar-action-back" onClick={onReturnToStart} disabled={saveState === 'saving'} aria-label="開始画面へ戻る">⌂ <span>もどる</span></button>
+    ),
+    undo: (
+      <button key="undo" className="icon-action toolbar-action-undo" disabled={!canUndo} onClick={onUndo} aria-label="ひとつ戻る" title="戻る">↶</button>
+    ),
+    redo: (
+      <button key="redo" className="icon-action toolbar-action-redo" disabled={!canRedo} onClick={onRedo} aria-label="やり直す" title="やり直す">↷</button>
+    ),
+    save: (
+      <button key="save" className="text-action primary toolbar-action-save" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
+    ),
+    png: (
+      <button key="png" className="text-action toolbar-action-png" onClick={onExportPng} disabled={isExportingPng} aria-busy={isExportingPng}>
+        {isExportingPng ? '⏳' : '⇩'} <span>{isExportingPng ? '保存中…' : 'PNG'}</span>
+      </button>
+    ),
+  } satisfies Record<'back' | 'undo' | 'redo' | 'save' | 'png', ReactElement>;
 
   return (
     <header className="toolbar creative-toolbar" aria-label="描画ツール">
@@ -75,13 +129,17 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
       <div className="toolbar-spacer" />
 
       <div className="creative-actions">
-        <button className="text-action" onClick={onReturnToStart} disabled={saveState === 'saving'} aria-label="開始画面へ戻る">⌂ <span>もどる</span></button>
-        <button className="icon-action" disabled={!canUndo} onClick={onUndo} aria-label="ひとつ戻る" title="戻る">↶</button>
-        <button className="icon-action" disabled={!canRedo} onClick={onRedo} aria-label="やり直す" title="やり直す">↷</button>
-        <button className="text-action primary" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
-        <button className="text-action" onClick={onExportPng} disabled={isExportingPng} aria-busy={isExportingPng}>
-          {isExportingPng ? '⏳' : '⇩'} <span>{isExportingPng ? '保存中…' : 'PNG'}</span>
-        </button>
+        {/* OEK-05-S04-BUG02 review fix (2回目): portrait/landscapeで求める
+           視覚順が異なる（landscape: 戻る→Undo→Redo→保存→PNG、
+           portrait: Undo→Redo→保存→PNG→戻る）ため、CSSのorderで見た目だけ
+           入れ替えるとどちらか一方のタブ順が必ず視覚順とずれる
+           （Codexレビュー指摘 PRRT_kwDOUiR8RM6mYwYx, comment_id 4138644275）。
+           useIsPortraitViewportで実際のviewport向きを検知し、DOM順そのものを
+           向きごとに並べ替えることで、DOM順=視覚順=タブ順を両方の向きで保証
+           する。CSS側（creative-ui.css）にはこの5要素へのorderを一切置かない。
+           PNGボタンのisExportingPng対応(disabled/aria-busy/ラベル切替、
+           OEK-05-S04-BUG01 #18でmain側に追加)はactionButtons.png側に統合済み。 */}
+        {(isPortrait ? (['undo', 'redo', 'save', 'png', 'back'] as const) : (['back', 'undo', 'redo', 'save', 'png'] as const)).map((key) => actionButtons[key])}
       </div>
     </header>
   );
