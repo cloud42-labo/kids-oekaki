@@ -114,4 +114,34 @@ test.describe('stamp popover', () => {
     await openStampPopover(page);
     await assertPopoverWithinViewport(page);
   });
+
+  test('⑦ portraitで.primary-toolsを直接横スクロールしても位置がずれない', async ({ page }) => {
+    // OEK-05-S04-BUG02 review fix (3回目): portraitの2段構成では、実際に横スクロール
+    // するのは外側の.toolbar(header, toolbarRef)ではなく内側の.primary-toolsになった。
+    // scrollイベントはバブリングしないため、toolbarRefへ付けたリスナーだけでは
+    // .primary-toolsのスクロールを検知できず、ポップアップの位置がずれたまま残る
+    // 不具合があった（Codexレビュー指摘 comment_id 4138732732）。
+    await page.setViewportSize({ width: 360, height: 780 });
+    await startBlankDrawing(page, 'たて');
+
+    // 実際のボタン数・幅では360px幅でも.primary-toolsが横スクロールしない場合が
+    // あり得る（ボタンサイズは今後も変わりうる）。このテストの主旨は「内側の
+    // 実スクローラーがスクロールしたときにreposition(scrollリスナー)が発火する
+    // か」であって「360pxで実際に収まるか」（それはe2e/toolbar-two-row.spec.ts
+    // の領分）ではないため、横スクロールの発生自体はstyleで強制して決定的にする。
+    await page.addStyleTag({ content: '.primary-tools { max-width: 120px !important; }' });
+
+    const primaryTools = page.locator('.primary-tools');
+    await primaryTools.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
+    await expect.poll(async () => primaryTools.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+
+    await openStampPopover(page);
+    await assertPopoverWithinViewport(page);
+
+    // スクロール後に開いた場合だけでなく、開いた状態でさらにスクロールしても
+    // reposition(scrollリスナー)が発火して追従することを確認する。
+    await primaryTools.evaluate((el) => { el.scrollLeft = 0; });
+    await expect.poll(async () => primaryTools.evaluate((el) => el.scrollLeft)).toBe(0);
+    await assertPopoverWithinViewport(page);
+  });
 });

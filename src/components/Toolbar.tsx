@@ -135,6 +135,9 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
     // 実際の挙動はAIレビューだけで完結せず実機確認が必要）。captureフェーズで
     // 登録すると、bubbleしないscrollイベントも子孫要素から拾えるため、
     // .primary-tools以外の将来のスクロール可能な子要素にも対応できる。
+    // (同じ修正が並行セッションでも入り、マージ時に同一内容へ収束した。
+    // 回帰テストはe2e/toolbar-two-row.spec.tsとe2e/stamp-popover.spec.ts
+    // の両方に別アプローチで追加されている。)
     toolbar?.addEventListener('scroll', reposition, { passive: true, capture: true });
     return () => {
       window.removeEventListener('resize', reposition);
