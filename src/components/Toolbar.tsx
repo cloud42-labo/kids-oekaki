@@ -125,11 +125,16 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
     const toolbar = toolbarRef.current;
     window.addEventListener('resize', reposition);
     window.visualViewport?.addEventListener('resize', reposition);
-    toolbar?.addEventListener('scroll', reposition, { passive: true });
+    // OEK-05-S04-BUG02 review fix (3回目): scrollイベントはバブリングしないため、
+    // 内側の実スクローラー(.primary-tools、狭幅portraitで横スクロールする)がscrollしても
+    // toolbarRef(外側のheader)には届かない（Codexレビュー指摘 comment_id 4138732732）。
+    // captureフェーズはバブリングと無関係に子孫まで伝播するため、captureで登録することで
+    // どの子要素がスクロールしても検知できるようにする。
+    toolbar?.addEventListener('scroll', reposition, { passive: true, capture: true });
     return () => {
       window.removeEventListener('resize', reposition);
       window.visualViewport?.removeEventListener('resize', reposition);
-      toolbar?.removeEventListener('scroll', reposition);
+      toolbar?.removeEventListener('scroll', reposition, { capture: true });
     };
   }, []);
 
