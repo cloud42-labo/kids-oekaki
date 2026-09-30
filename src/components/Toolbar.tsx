@@ -65,10 +65,11 @@ type Props = {
   onReturnToStart: () => void;
   onSaveDraft: () => void;
   onExportPng: () => void;
+  isExportingPng: boolean;
   saveState: SaveState;
 };
 
-export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, saveState }: Props) {
+export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, canUndo, canRedo, onUndo, onRedo, onReturnToStart, onSaveDraft, onExportPng, isExportingPng, saveState }: Props) {
   const toolbarRef = useRef<HTMLElement>(null);
   const stampMenuRef = useRef<HTMLDetailsElement>(null);
   const stampPopoverRef = useRef<HTMLDivElement>(null);
@@ -95,7 +96,9 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
       <button key="save" className="text-action primary toolbar-action-save" onClick={onSaveDraft} disabled={saveState === 'saving'}>⌑ <span>{saveLabel}</span></button>
     ),
     png: (
-      <button key="png" className="text-action toolbar-action-png" onClick={onExportPng}>⇩ <span>PNG</span></button>
+      <button key="png" className="text-action toolbar-action-png" onClick={onExportPng} disabled={isExportingPng} aria-busy={isExportingPng}>
+        {isExportingPng ? '⏳' : '⇩'} <span>{isExportingPng ? '保存中…' : 'PNG'}</span>
+      </button>
     ),
   } satisfies Record<'back' | 'undo' | 'redo' | 'save' | 'png', ReactElement>;
 
@@ -209,7 +212,9 @@ export function Toolbar({ settings, setSettings, mirrorEnabled, onToggleMirror, 
            （Codexレビュー指摘 PRRT_kwDOUiR8RM6mYwYx, comment_id 4138644275）。
            useIsPortraitViewportで実際のviewport向きを検知し、DOM順そのものを
            向きごとに並べ替えることで、DOM順=視覚順=タブ順を両方の向きで保証
-           する。CSS側（creative-ui.css）にはこの5要素へのorderを一切置かない。 */}
+           する。CSS側（creative-ui.css）にはこの5要素へのorderを一切置かない。
+           PNGボタンのisExportingPng対応(disabled/aria-busy/ラベル切替、
+           OEK-05-S04-BUG01 #18でmain側に追加)はactionButtons.png側に統合済み。 */}
         {(isPortrait ? (['undo', 'redo', 'save', 'png', 'back'] as const) : (['back', 'undo', 'redo', 'save', 'png'] as const)).map((key) => actionButtons[key])}
       </div>
     </header>
