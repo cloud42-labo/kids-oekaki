@@ -3,7 +3,7 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { Media } from '@capacitor-community/media';
 import type { DrawingDocument } from '../domain/drawing';
-import { renderDocument } from '../engine/renderer';
+import { preloadDocumentImages, renderDocument } from '../engine/renderer';
 
 const ALBUM_NAME = 'おえかき';
 
@@ -90,12 +90,21 @@ function saveOnWeb(blob: Blob, filename: string) {
 }
 
 export async function exportPng(document: DrawingDocument) {
+  // Guarantees any imported draft image is fully decoded before rasterizing,
+  // so export doesn't race the renderer's own lazy/self-healing image load
+  // (which is fine for interactive redraws but would silently omit an image
+  // from a PNG grabbed the instant the app loads or a session is restored).
+  await preloadDocumentImages(document);
+
   const canvas = window.document.createElement('canvas');
   canvas.width = document.width;
   canvas.height = document.height;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
-  renderDocument(ctx, document);
+  // { prune: false }: same reasoning as documentStorage.ts's createThumbnail
+  // — this one-off export canvas isn't the live editor, so it must not evict
+  // renderer.ts's shared decode cache against just this document.
+  renderDocument(ctx, document, null, null, { prune: false });
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((result) => result ? resolve(result) : reject(new Error('PNG export failed')), 'image/png');

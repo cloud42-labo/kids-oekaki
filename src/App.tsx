@@ -5,11 +5,14 @@ import { ColorPalette } from './components/ColorPalette';
 import { LayerPanel } from './components/LayerPanel';
 import { StartScreen } from './components/StartScreen';
 import { Toolbar } from './components/Toolbar';
-import type { MangaPresetKind, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import type { ImageObject, MangaPresetKind, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import { preloadDocumentImages } from './engine/renderer';
+import type { ImageBox } from './engine/renderer';
 import { useDrawingDocument } from './state/useDrawingDocument';
 import { deleteDrawingSession, listDrawingSessions, renameDrawingSession, saveDrawingSession } from './utils/documentStorage';
 import type { StoredDrawingSession } from './utils/documentStorage';
 import { exportPng } from './utils/exportPng';
+import { loadDraftImageFile } from './utils/importImage';
 import './save-resume.css';
 import './creative-ui.css';
 
@@ -59,6 +62,36 @@ export default function App() {
     }
   });
   const [settings, setSettings] = useState<ToolSettings>(DEFAULT_SETTINGS);
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  const [imageImportError, setImageImportError] = useState<string>();
+  // importImage() below decodes a picked photo asynchronously; if the user
+  // returns to the start screen and opens/starts a different document before
+  // that finishes, the stale result must not land in whatever document
+  // happens to be active when it resolves. A ref (not the `activeSessionId`
+  // captured in importImage's own closure) is required here because we need
+  // the *latest* value at resolution time, not the value from when the
+  // import began.
+  //
+  // The ref must not rely solely on this effect to stay current: React does
+  // not flush passive effects synchronously after `setActiveSessionId`, so a
+  // decode that resolves in the gap between that state update and this
+  // effect running would still read the stale ref value and pass the
+  // isStale() check. Every place that changes the active session therefore
+  // also writes `activeSessionIdRef.current` synchronously (see
+  // `setActiveSession` below); this effect remains only as a defensive
+  // backstop for updates that might bypass that helper.
+  const activeSessionIdRef = useRef(activeSessionId);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+  // Sets `activeSessionId` state while also updating the ref synchronously
+  // in the same call, so `importImage`'s stale check can never observe a
+  // window where the state has moved on but the ref still holds the
+  // previous session id.
+  const setActiveSession = (sessionId: string | null) => {
+    activeSessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
+  };
   // ミラー描画モードはdocument/settingsの一部ではなく、その場のUI操作の
   // 状態としてのみ扱う(保存データのschemaには影響しない)。新規作成・
   // 続きから、どちらでも既定はOFFに戻す。
@@ -119,8 +152,9 @@ export default function App() {
   const start = (template: TemplateKind, orientation: Orientation, mangaPreset?: MangaPresetKind) => {
     drawing.reset(template, orientation, mangaPreset);
     setSettings(DEFAULT_SETTINGS);
+    setSelectedImageId(null);
     setMirrorEnabled(false);
-    setActiveSessionId(crypto.randomUUID());
+    setActiveSession(crypto.randomUUID());
     setSaveState('idle');
     setStarted(true);
   };
@@ -130,11 +164,61 @@ export default function App() {
     if (!session) return;
     drawing.restoreHistory(session.history);
     setSettings(normalizeRestoredSettings(session.settings ?? DEFAULT_SETTINGS));
+    setSelectedImageId(null);
     setMirrorEnabled(false);
-    setActiveSessionId(session.id);
+    setActiveSession(session.id);
     setSaveState('saved');
     setStarted(true);
+    // Warm the decode cache so any draft-layer photo is ready to paint on
+    // the very first frame instead of popping in a moment later.
+    void preloadDocumentImages(session.history.present);
   };
+
+  const importImage = async (file: File) => {
+    // Snapshot which document this import is for. Decoding is async (file
+    // read + downscale), so the user can return to the start screen and
+    // open/start a different document while it's in flight; importDraftImage
+    // always applies to whatever document is current *when it's called*, so
+    // without this check a slow decode could silently insert (and then
+    // autosave) one session's chosen photo into an unrelated session.
+    const sessionAtImport = activeSessionId;
+    const isStale = () => activeSessionIdRef.current !== sessionAtImport;
+    try {
+      setImageImportError(undefined);
+      const decoded = await loadDraftImageFile(file);
+      if (isStale()) return;
+      const maxWidth = drawing.document.width * 0.8;
+      const maxHeight = drawing.document.height * 0.8;
+      const scale = Math.min(maxWidth / decoded.naturalWidth, maxHeight / decoded.naturalHeight, 1);
+      const width = decoded.naturalWidth * scale;
+      const height = decoded.naturalHeight * scale;
+      const image: ImageObject = {
+        id: crypto.randomUUID(),
+        type: 'image',
+        src: decoded.src,
+        x: (drawing.document.width - width) / 2,
+        y: (drawing.document.height - height) / 2,
+        width,
+        height,
+      };
+      drawing.importDraftImage(image);
+      setSelectedImageId(image.id);
+      setSettings((current) => ({ ...current, mode: 'image' }));
+    } catch (error) {
+      if (isStale()) return;
+      setImageImportError(error instanceof Error ? error.message : '画像をとりこめませんでした。');
+    }
+  };
+
+  const updateImage = (id: string, box: ImageBox) => {
+    drawing.updateImageObject(id, box);
+  };
+
+  // Whether the current document already has an imported photo anywhere —
+  // drives Toolbar's photo button: once one exists, the button re-enters
+  // image-edit mode to reselect/move/resize it instead of always reopening
+  // the file picker (see Toolbar's onImportImage/hasDraftImage handling).
+  const hasDraftImage = drawing.document.layers.some((layer) => layer.objects.some((object) => object.type === 'image'));
 
   const returnToStart = async () => {
     if (!activeSessionId) {
@@ -169,7 +253,7 @@ export default function App() {
     try {
       await deleteDrawingSession(sessionId);
       setSavedSessions((current) => current.filter((session) => session.id !== sessionId));
-      if (activeSessionId === sessionId) setActiveSessionId(null);
+      if (activeSessionId === sessionId) setActiveSession(null);
       setStorageError(undefined);
     } catch {
       setStorageError('作品を削除できませんでした。');
@@ -242,9 +326,12 @@ export default function App() {
         onSaveDraft={() => void saveCurrent(true)}
         onExportPng={() => void handleExportPng()}
         isExportingPng={isExportingPng}
+        onImportImage={(file) => void importImage(file)}
+        hasDraftImage={hasDraftImage}
         saveState={saveState}
       />
       {storageError && <div className="save-error-banner" role="alert">⚠️ {storageError}</div>}
+      {imageImportError && <div className="save-error-banner" role="alert">⚠️ {imageImportError}</div>}
       <div className="workspace creative-workspace" onPointerDownCapture={handleColorPick}>
         <ColorPalette
           color={settings.color}
@@ -260,6 +347,9 @@ export default function App() {
           onCommitStroke={drawing.commitStroke}
           onCommitBlur={drawing.commitBlur}
           onCommitMirroredStroke={drawing.commitMirroredStroke}
+          selectedImageId={selectedImageId}
+          onSelectImage={setSelectedImageId}
+          onUpdateImage={updateImage}
         />
         <LayerPanel
           layers={drawing.document.layers}
