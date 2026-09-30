@@ -47,7 +47,7 @@ function validateHistory(history: DrawingHistory | undefined) {
 
 function defaultName(history: DrawingHistory, savedAt: string) {
   const templateKind = history.present.template;
-  const template = templateKind === '4koma'
+  const template = templateKind === 'manga' || templateKind === '4koma'
     ? 'まんが'
     : templateKind === 'diary'
       ? 'えにっき'

@@ -103,13 +103,13 @@ test.describe('LINEスタンプモード: 透過PNG書き出し', () => {
     await page.goto('/');
     await page.getByRole('button', { name: /LINEスタンプ/ }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
     await expect(page.locator('.canvas-frame-transparent')).toBeVisible();
 
     await page.goto('/');
     await page.getByRole('button', { name: /まっしろ/ }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
     await expect(page.locator('.canvas-frame-transparent')).toHaveCount(0);
   });
 
@@ -118,7 +118,7 @@ test.describe('LINEスタンプモード: 透過PNG書き出し', () => {
     await page.goto('/');
     await page.getByRole('button', { name: /LINEスタンプ/ }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     // 既定色(黒)のままだと「白色一律削除ではないこと」を確認できないため、
     // 明示的に白を選んでから描く。
@@ -146,7 +146,7 @@ test.describe('LINEスタンプモード: 透過PNG書き出し', () => {
     await page.goto('/');
     await page.getByRole('button', { name: /まっしろ/ }).click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     await exportPngAndWaitDownload(page);
 
@@ -157,12 +157,13 @@ test.describe('LINEスタンプモード: 透過PNG書き出し', () => {
     expect(untouched[2]).toBeGreaterThan(250);
   });
 
-  test('通常モード（まんが=旧4koma）のPNG書き出しも、背景が不透明なまま変わらない', async ({ page }) => {
+  test('通常モード（まんが）のPNG書き出しも、背景が不透明なまま変わらない', async ({ page }) => {
     await armExportedBlobCapture(page);
     await page.goto('/');
     await page.getByRole('button', { name: /まんが/ }).click();
+    await page.getByRole('group', { name: 'コマわりプリセット' }).getByRole('button').first().click();
     await page.getByRole('button', { name: /たて/ }).click();
-    await expect(page.locator('.stamp-menu')).toBeVisible();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
 
     await exportPngAndWaitDownload(page);
 
