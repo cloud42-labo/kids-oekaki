@@ -5,11 +5,10 @@ import { drawTemplate, MANGA_PRESETS } from '../domain/templates';
 import type { StoredDrawingSession } from '../utils/documentStorage';
 
 // 開始画面の主要選択肢。OEK-05-S04-T04で絵日記を廃止し、白紙/漫画/LINEスタンプの
-// 3択へ整理した。LINEスタンプはOEK-05-S04-T03側で別途実装される予定のため、
-// ここでは「近日公開」として選択できない枠だけを用意し、後続タスクが有効化
-// できるようにする（このタスクではLINEスタンプ機能そのものは実装しない）。
+// 3択へ整理した。LINEスタンプ（OEK-05-S04-T03）は背景を描かず透明PNGとして
+// 保存できるモードで、選ぶと漫画のようなコマ割り選択は挟まず向き選択へ進む。
 type MainChoice = {
-  key: TemplateKind | 'line-sticker';
+  key: TemplateKind;
   icon: string;
   label: string;
   note: string;
@@ -19,7 +18,7 @@ type MainChoice = {
 const mainChoices: MainChoice[] = [
   { key: 'blank', icon: '🖍️', label: 'まっしろ', note: 'じゆうに かこう' },
   { key: 'manga', icon: '💬', label: 'まんが', note: 'コマを えらんで つくろう' },
-  { key: 'line-sticker', icon: '🏷️', label: 'LINEスタンプ', note: 'ちかぢか つかえます', disabled: true },
+  { key: 'line-sticker', icon: '🏷️', label: 'LINEスタンプ', note: 'すきとおる はいけいで つくる' },
 ];
 
 const orientations: Array<{ key: Orientation; icon: string; label: string; note: string }> = [
@@ -79,7 +78,7 @@ export function StartScreen({ onStart, onContinue, onDelete, onRename, savedSess
   };
 
   const selectMain = (choice: MainChoice) => {
-    if (choice.disabled || choice.key === 'line-sticker') return;
+    if (choice.disabled) return;
     setTemplate(choice.key);
     setStep(choice.key === 'manga' ? 'preset' : 'orientation');
   };

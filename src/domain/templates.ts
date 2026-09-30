@@ -1,3 +1,4 @@
+import { isTransparentBackgroundTemplate } from './drawing';
 import type { MangaPresetKind, TemplateKind } from './drawing';
 
 // コマ矩形は、外枠マージンを引いた「内側の作画エリア」に対する0..1の比率で
@@ -126,6 +127,17 @@ export function drawTemplate(
   mangaPreset?: MangaPresetKind,
 ) {
   ctx.save();
+
+  // OEK-05-S04-T03: LINEスタンプモードでは背景レイヤーそのものを描かない
+  // (「白背景を透明化する」のではなく、そもそも塗らない)。renderDocument側で
+  // 毎フレームclearRectされた直後のalpha=0のまま残すことで、PNG書き出し時に
+  // 未描画部分がそのまま透明ピクセルになる。白色一律削除・自動背景除去は
+  // 対象外(Owner確認 2026-09-26)。
+  if (isTransparentBackgroundTemplate(template)) {
+    ctx.restore();
+    return;
+  }
+
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, width, height);
   ctx.strokeStyle = '#2a2530';

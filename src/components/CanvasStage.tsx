@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { BlurObject, DrawingDocument, Point, StampObject, StrokeObject, ToolSettings } from '../domain/drawing';
-import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
+import { DEFAULT_BLUR_STRENGTH, STAMP_SIZE, isTransparentBackgroundTemplate, mirrorPointAcrossAxis, mirrorStrokeAcrossAxis } from '../domain/drawing';
 import { renderDocument } from '../engine/renderer';
 
 type Props = {
@@ -54,10 +54,22 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 // destination-out等でアルファが必須のため対象外、renderer.ts側は変更していない）。
 // 低スペックAndroid GPUでのコンポジットコストは、ペン入力のもたつき
 // （OEK-05-S03-BUG03）の一因になり得るため、低リスクな改善として適用する。
-const get2dContext = (canvas: HTMLCanvasElement | null) => canvas?.getContext('2d', { alpha: false }) ?? null;
+//
+// OEK-05-S04-T03: LINEスタンプモードはこの前提が崩れる唯一の例外。
+// drawTemplate()は背景を全く塗らない(isTransparentBackgroundTemplate)ため、
+// このメインcanvas自体がアルファチャンネルを持てないと未描画部分を透明として
+// 表示できない。このモードに限り`alpha: true`を渡し、CSS側のチェッカーボード
+// (styles.cssの.canvas-frame-transparent)がその透明部分から透けて見えるように
+// する。getContext()の属性は最初の呼び出しでcanvas要素ごとに確定するため、
+// document.template(=セッション開始時に決まり、以後変わらない)から一度だけ
+// 判定すれば呼び出し順に関わらず一貫する。
+const get2dContext = (canvas: HTMLCanvasElement | null, alpha: boolean) => canvas?.getContext('2d', { alpha }) ?? null;
 
 export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke, onCommitBlur, onCommitStamp, onCommitMirroredStroke }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // documentは1セッション中テンプレートが変わらない(startで作り直すとCanvasStage
+  // 自体がApp.tsx側でアンマウント/リマウントされる)ため、ここで固定してよい。
+  const canvasHasAlpha = isTransparentBackgroundTemplate(document.template);
   const frameRef = useRef<HTMLDivElement>(null);
   const activePointerId = useRef<number | null>(null);
   const [draft, setDraft] = useState<StrokeObject | BlurObject | null>(null);
@@ -95,7 +107,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const ctx = get2dContext(canvas);
+    const ctx = get2dContext(canvas, canvasHasAlpha);
     if (!canvas || !ctx) return;
     const draftObjects = draft ? (mirrorDraft ? [draft, mirrorDraft] : [draft]) : null;
     renderDocument(ctx, document, draftObjects);
@@ -126,7 +138,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   const restoreCommittedDocument = () => {
     const canvas = canvasRef.current;
-    const ctx = get2dContext(canvas);
+    const ctx = get2dContext(canvas, canvasHasAlpha);
     if (!canvas || !ctx) return;
     renderDocument(ctx, document, null);
   };
@@ -235,8 +247,10 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   // OEK-05-S03-BUG03: 高速パス（RAFバッチ処理によるインクリメンタル描画）は
   // 'pen'ブラシに限定する。一度'eraser'にも拡張したが、この高速パスは
-  // get2dContext()経由でメイン表示用canvas（{alpha:false}、レイヤー合成を
-  // 経由しない1枚のflattenedな不透明canvas）へ直接destination-outを描く。
+  // get2dContext()経由でメイン表示用canvas（通常{alpha:false}、レイヤー合成を
+  // 経由しない1枚のflattenedなcanvas。LINEスタンプモードだけ透明PNG書き出しの
+  // ためcanvasHasAlpha=trueになるが、この段落の議論自体はそちらでも変わらない）
+  // へ直接destination-outを描く。
   // alpha:falseのcanvasはアルファチャンネルを保持できないため、消しゴムで
   // 作られるはずの透明部分を表現できず、ストローク中（pointer-up前）だけ
   // 黒などの不正な色で表示される回帰を生んだ（Codexレビュー指摘P1、
@@ -271,7 +285,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
   };
 
   const drawLiveDot = (stroke: StrokeObject, point: Point) => {
-    const ctx = get2dContext(canvasRef.current);
+    const ctx = get2dContext(canvasRef.current, canvasHasAlpha);
     if (!ctx) return;
     ctx.save();
     configureLiveStrokeContext(ctx, stroke);
@@ -283,7 +297,7 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
 
   const drawLiveSegments = (stroke: StrokeObject, points: Point[]) => {
     if (!points.length) return;
-    const ctx = get2dContext(canvasRef.current);
+    const ctx = get2dContext(canvasRef.current, canvasHasAlpha);
     const previous = stroke.points[stroke.points.length - 1];
     if (!ctx || !previous) return;
 
@@ -536,7 +550,12 @@ export function CanvasStage({ document, settings, mirrorEnabled, onCommitStroke,
     <div className="canvas-area">
       <div
         ref={frameRef}
-        className="canvas-frame"
+        // OEK-05-S04-T03: LINEスタンプモードでは.canvas-frame-transparentの
+        // チェッカーボードCSS（styles.css）が、canvasの透明ピクセル(alpha=0の
+        // 未描画部分)の背後から見える。これは表示専用のオーバーレイであり、
+        // drawTemplate()自体はこの模様を一切描かないため、exportPng/サムネイル
+        // 生成には混ざらない(同じrenderDocumentを使う別canvasにはCSS背景が無い)。
+        className={`canvas-frame${canvasHasAlpha ? ' canvas-frame-transparent' : ''}`}
         style={{
           aspectRatio: `${document.width} / ${document.height}`,
           transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,

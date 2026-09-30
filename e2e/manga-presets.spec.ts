@@ -103,12 +103,12 @@ function panelRectPx(panel: { x: number; y: number; w: number; h: number }, widt
 const TOP_WIDE_BOTTOM_SPLIT = MANGA_PRESETS.find((p) => p.key === 'top-wide-bottom-split')!;
 
 test.describe('開始画面: 白紙/漫画/LINEスタンプへの整理', () => {
-  test('絵日記の選択肢が無く、白紙/まんが/LINEスタンプ(近日公開)の3択になっている', async ({ page }) => {
+  test('絵日記の選択肢が無く、白紙/まんが/LINEスタンプの3択になっている（LINEスタンプは選べる）', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByRole('button', { name: /まっしろ/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /^まんが/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /LINEスタンプ/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /LINEスタンプ/ })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /LINEスタンプ/ })).toBeEnabled();
     await expect(page.getByRole('button', { name: /えにっき/ })).toHaveCount(0);
   });
 

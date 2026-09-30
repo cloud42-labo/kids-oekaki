@@ -10,7 +10,8 @@ export type Orientation = 'portrait' | 'landscape';
 // 読み込めるようにするためだけに残す後方互換値で、開始画面からは選べない
 // （OEK-05-S04-T04: 絵日記を廃止し、固定4コマだったものをプリセットの1つ
 // [MangaPresetKind = 'grid-4'] へ格上げした）。
-export type TemplateKind = 'blank' | 'manga' | '4koma' | 'diary';
+// 'line-sticker'はLINEスタンプモード（OEK-05-S04-T03）で、背景を描かず透明PNGにする。
+export type TemplateKind = 'blank' | 'manga' | '4koma' | 'diary' | 'line-sticker';
 
 // 漫画モードのコマ割りプリセット。少なくとも5種類の変則コマ割り
 // （+ 従来の固定4コマ相当の'grid-4'）を用意する。各プリセットの実際の
@@ -23,6 +24,16 @@ export type MangaPresetKind =
   | 'left-large-right-stack'
   | 'top-wide-bottom-split'
   | 'center-large-surround';
+
+// LINEスタンプモード専用の判定。Owner確認(2026-09-26)のとおり、これは
+// 「白背景を検出して透明化する」のではなく「このテンプレートでは背景レイヤー
+// そのものを一切描画しない」という設計。未描画部分はcanvasをclearRectした
+// ままのalpha=0を保つ。ユーザーが実際に白色で描いた線・文字・スタンプは
+// 通常のsource-over描画でalpha=1の不透明な白として乗るため、透明化の対象には
+// ならない（対象はあくまで「描かれていない領域」だけ）。
+export function isTransparentBackgroundTemplate(template: TemplateKind): boolean {
+  return template === 'line-sticker';
+}
 export type BrushKind = 'pen' | 'marker' | 'eraser' | 'blur' | 'rainbow' | 'neon';
 
 export type Point = {
