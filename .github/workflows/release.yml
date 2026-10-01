@@ -23,6 +23,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
@@ -210,6 +211,31 @@ jobs:
             kids-oekaki-migration.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Reject stale rolling-release reruns
+        if: ${{ steps.version.outputs.release_tag == 'latest' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # A rerun keeps its original GITHUB_RUN_NUMBER. If a newer successful
+          # main release already exists, this run must never move the shared
+          # latest tag/assets backwards to an older SHA/versionCode.
+          latest_successful_run="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&status=success&per_page=100" \
+              --jq '[.workflow_runs[].run_number] | max // 0' \
+              | sort -nr \
+              | head -1
+          )"
+
+          if [ "$latest_successful_run" -gt "$GITHUB_RUN_NUMBER" ]; then
+            echo "::error::Refusing stale rolling-release rerun: current run #$GITHUB_RUN_NUMBER is older than successful release run #$latest_successful_run."
+            exit 1
+          fi
 
       - name: Publish rolling/versioned GitHub Release
         env:
