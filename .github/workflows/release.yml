@@ -14,10 +14,11 @@ on:
     tags:
       - 'v*'
 
-# Serialize rolling main releases independently from versioned tag releases.
-# This prevents tag runs from replacing a pending main rolling-release run.
+# Serialize only first-attempt main rolling releases. Reruns use their own run_id
+# group, so a stale rerun cannot enter rolling-main and evict a newer pending main run.
+# Tag runs are isolated by run_id as well.
 concurrency:
-  group: kids-oekaki-release-${{ github.ref == 'refs/heads/main' && 'rolling-main' || github.ref }}
+  group: kids-oekaki-release-${{ github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'rolling-main' || github.run_id }}
   cancel-in-progress: false
 
 permissions:
