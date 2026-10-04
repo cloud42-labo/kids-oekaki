@@ -8,17 +8,19 @@ on:
         required: false
         default: false
         type: boolean
+      release_tag:
+        description: 'Optional versioned release tag (must equal v<package.json version>); leave blank for artifact-only manual runs'
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - main
-    tags:
-      - 'v*'
 
-# Serialize only first-attempt main rolling releases. Reruns use their own run_id
-# group, so a stale rerun cannot enter rolling-main and evict a newer pending main run.
-# Tag runs are isolated by run_id as well.
+# Serialize only first-attempt main push releases. Reruns and manual runs use their
+# own run_id group, so neither can enter rolling-main and evict a newer pending push.
 concurrency:
-  group: kids-oekaki-release-${{ github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'rolling-main' || github.run_id }}
+  group: kids-oekaki-release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'rolling-main' || github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -29,7 +31,8 @@ jobs:
   release:
     # workflow_dispatch can select any branch. Never expose persistent signing
     # secrets to an unreviewed non-main branch; manual release/migration runs are
-    # allowed only from main. Tag releases arrive through the push trigger.
+    # allowed only from main. Versioned releases are created by a main dispatch,
+    # never by an arbitrary tag push.
     if: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
@@ -46,24 +49,35 @@ jobs:
 
       - name: Resolve release version and Android versionCode
         id: version
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          INCLUDE_MIGRATION_APK: ${{ inputs.include_migration_apk }}
         shell: bash
         run: |
           set -euo pipefail
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
 
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            RELEASE_TAG="$GITHUB_REF_NAME"
-            PUBLISH_RELEASE=true
-            if [ "${RELEASE_TAG#v}" != "$PACKAGE_VERSION" ]; then
-              echo "Tag $RELEASE_TAG does not match package.json version $PACKAGE_VERSION" >&2
+          if [ -n "$REQUESTED_RELEASE_TAG" ]; then
+            if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ] || [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "Versioned releases may only be requested by workflow_dispatch on main." >&2
               exit 1
             fi
-          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            if [ "$INCLUDE_MIGRATION_APK" = "true" ]; then
+              echo "Do not attach the debuggable migration APK to a versioned release. Run migration as an artifact-only dispatch." >&2
+              exit 1
+            fi
+            RELEASE_TAG="$REQUESTED_RELEASE_TAG"
+            PUBLISH_RELEASE=true
+            if [ "$RELEASE_TAG" != "v$PACKAGE_VERSION" ]; then
+              echo "Requested release tag $RELEASE_TAG does not match package.json version v$PACKAGE_VERSION" >&2
+              exit 1
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
             RELEASE_TAG="latest"
             PUBLISH_RELEASE=true
           else
-            # workflow_dispatch may be launched from another branch. Build/test and
-            # upload workflow artifacts, but never move the shared latest release.
+            # Manual main runs without release_tag are artifact-only. This is the
+            # one-time migration path and never mutates the shared latest release.
             RELEASE_TAG=""
             PUBLISH_RELEASE=false
           fi
@@ -291,6 +305,21 @@ jobs:
             fi
             gh release create "$RELEASE_TAG"               --target "$GITHUB_SHA"               --title "$RELEASE_TAG (v$PACKAGE_VERSION, code $RELEASE_CODE)"               --notes-file release-notes.md               "${EXTRA[@]}"
           fi
+
+          # Remove any legacy ephemeral-debug APKs left on historical releases.
+          # Fixed-signed release/migration APKs are the only Android installables
+          # that may remain publicly downloadable after this migration.
+          legacy_debug_asset_ids="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | .assets[] | select(.name | test("^kids-oekaki-v.*-debug\\.apk$")) | .id'
+          )"
+          for legacy_asset_id in $legacy_debug_asset_ids; do
+            gh api --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/releases/assets/${legacy_asset_id}"
+          done
 
           # A migration APK is intentionally one-time. If an earlier rolling run
           # attached one but this run did not generate it, remove the stale asset so
