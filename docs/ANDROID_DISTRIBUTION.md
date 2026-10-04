@@ -90,10 +90,12 @@ Play App Signingを有効にした場合、Play配布APKの最終アプリ署名
 4. release APK / AABを固定鍵で署名
 5. APK/AAB署名指紋をkeystoreと照合
 6. `kids-oekaki-release.apk` と `kids-oekaki-release.aab` をGitHub Releaseへ公開
-7. main上の通常ビルドはrolling tag `latest`、`v*` tag pushはversioned releaseとして公開
+7. mainへのpushはrolling tag `latest` として公開する
+8. versioned releaseはmain上の `workflow_dispatch` で `release_tag=v<package.json version>` を指定して作成する。任意commitへの `v*` tag pushから署名Releaseは実行しない
 
 `workflow_dispatch` で `include_migration_apk=true` を指定した場合だけ、
-`kids-oekaki-migration.apk` も生成する。
+`kids-oekaki-migration.apk` も生成する。この移行runでは `release_tag` を空欄にし、
+GitHub Releaseを更新せずworkflow artifactとして取得する。
 
 migration APKは固定Release鍵で署名する一方、既存データ復元のため `debuggable=true` とする。
 通常利用・通常配布には使わない。
@@ -123,18 +125,19 @@ bash scripts/android-backup-appdata.sh
 
 4. 作成された `kids-oekaki-appdata-*.tar` が空でないことを確認する。
 5. GitHub Actions Secretsへ固定署名鍵4項目を登録する。
-6. Release workflowを `include_migration_apk=true` で1回実行する。
-7. **バックアップ確認後に限り**旧debug APKをアンインストールする。
-8. `kids-oekaki-migration.apk` をインストールする。
-9. migration APKは起動せず、以下でバックアップを復元する。
+6. GitHub Actionsの `Release Kids Oekaki` を **main** から手動実行し、`include_migration_apk=true`、`release_tag` は空欄にする。
+7. 成功runの `kids-oekaki-<version>-android-<versionCode>` workflow artifactをダウンロードし、`kids-oekaki-migration.apk` と `kids-oekaki-release.apk` を確保する。
+8. **バックアップ確認後に限り**旧debug APKをアンインストールする。
+9. `kids-oekaki-migration.apk` をインストールする。
+10. migration APKは起動せず、以下でバックアップを復元する。
 
 ```bash
 bash scripts/android-restore-appdata.sh kids-oekaki-appdata-YYYYMMDD-HHMMSS.tar
 ```
 
-10. migration APKを起動し、過去作品が一覧にあり開けることを確認する。
-11. `kids-oekaki-release.apk` をアンインストールせず上書きインストールする。
-12. 過去作品が残り、新規作品も保存・再読込できることを確認する。
+11. migration APKを起動し、過去作品が一覧にあり開けることを確認する。
+12. `kids-oekaki-release.apk` をアンインストールせず上書きインストールする。
+13. 過去作品が残り、新規作品も保存・再読込できることを確認する。
 
 ここまで完了すれば以後は固定署名版同士なので、
 **アンインストールなしの通常アップデートで作品データを維持できる。**
