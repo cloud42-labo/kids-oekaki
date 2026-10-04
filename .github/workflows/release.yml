@@ -14,10 +14,10 @@ on:
     tags:
       - 'v*'
 
-# Serialize release workflow executions. A stale rerun must never cancel a newer
-# main release and then publish an older SHA/versionCode as the shared latest release.
+# Serialize rolling main releases independently from versioned tag releases.
+# This prevents tag runs from replacing a pending main rolling-release run.
 concurrency:
-  group: kids-oekaki-release
+  group: kids-oekaki-release-${{ github.ref == 'refs/heads/main' && 'rolling-main' || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -26,6 +26,10 @@ permissions:
 
 jobs:
   release:
+    # workflow_dispatch can select any branch. Never expose persistent signing
+    # secrets to an unreviewed non-main branch; manual release/migration runs are
+    # allowed only from main. Tag releases arrive through the push trigger.
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -285,6 +289,24 @@ jobs:
               EXTRA+=(--prerelease)
             fi
             gh release create "$RELEASE_TAG"               --target "$GITHUB_SHA"               --title "$RELEASE_TAG (v$PACKAGE_VERSION, code $RELEASE_CODE)"               --notes-file release-notes.md               "${EXTRA[@]}"
+          fi
+
+          # A migration APK is intentionally one-time. If an earlier rolling run
+          # attached one but this run did not generate it, remove the stale asset so
+          # latest never keeps advertising an obsolete debuggable migration build.
+          if [ ! -f kids-oekaki-migration.apk ]; then
+            stale_migration_asset_id="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+                --jq '.assets[] | select(.name == "kids-oekaki-migration.apk") | .id' \
+                | head -1
+            )"
+            if [ -n "$stale_migration_asset_id" ]; then
+              gh api --method DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${GITHUB_REPOSITORY}/releases/assets/${stale_migration_asset_id}"
+            fi
           fi
 
           ASSETS=(kids-oekaki-release.apk kids-oekaki-release.aab kids-oekaki-web.zip)
