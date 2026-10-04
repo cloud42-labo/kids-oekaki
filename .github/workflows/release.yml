@@ -17,10 +17,11 @@ on:
     branches:
       - main
 
-# Serialize only first-attempt main push releases. Reruns and manual runs use their
-# own run_id group, so neither can enter rolling-main and evict a newer pending push.
+# First-attempt main pushes serialize in rolling-main. First-attempt versioned
+# dispatches serialize by release_tag. Reruns and artifact-only dispatches use
+# their own run_id so they cannot evict a newer pending rolling/versioned run.
 concurrency:
-  group: kids-oekaki-release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'rolling-main' || github.run_id }}
+  group: kids-oekaki-release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'rolling-main' || github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && inputs.release_tag != '' && format('version-{0}', inputs.release_tag) || github.run_id }}
   cancel-in-progress: false
 
 permissions:
@@ -62,6 +63,10 @@ jobs:
               echo "Versioned releases may only be requested by workflow_dispatch on main." >&2
               exit 1
             fi
+            if [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
+              echo "Versioned release reruns are not allowed. Start a fresh main dispatch so ordering remains monotonic." >&2
+              exit 1
+            fi
             if [ "$INCLUDE_MIGRATION_APK" = "true" ]; then
               echo "Do not attach the debuggable migration APK to a versioned release. Run migration as an artifact-only dispatch." >&2
               exit 1
@@ -93,6 +98,21 @@ jobs:
           echo "publish_release=$PUBLISH_RELEASE" >> "$GITHUB_OUTPUT"
           echo "migration_code=$MIGRATION_CODE" >> "$GITHUB_OUTPUT"
           echo "release_code=$RELEASE_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate existing version tag target
+        if: ${{ steps.version.outputs.publish_release == 'true' && steps.version.outputs.release_tag != 'latest' }}
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            EXISTING_TARGET="$(git rev-list -n 1 "$RELEASE_TAG")"
+            if [ "$EXISTING_TARGET" != "$GITHUB_SHA" ]; then
+              echo "::error::Refusing to reuse $RELEASE_TAG: it targets $EXISTING_TARGET, not current main commit $GITHUB_SHA."
+              exit 1
+            fi
+          fi
 
       - name: Validate release signing secrets
         env:
@@ -253,7 +273,7 @@ jobs:
           latest_main_run="$(
             gh api --paginate \
               -H "Accept: application/vnd.github+json" \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&per_page=100" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&event=push&per_page=100" \
               --jq '[.workflow_runs[].run_number] | max // 0' \
               | sort -nr \
               | head -1
