@@ -9,11 +9,14 @@ Claude自身はこの手順を実行できない。
 
 ## 準備
 
-1. GitHub Actionsの `android-debug-build` job（`.github/workflows/ci.yml`、対象commitの
-   Actions run）から `kids-oekaki-v<version>-debug-build<run>` artifactをダウンロードし、
-   端末へ転送する（USB / クラウドストレージ等）。
+1. GitHub Actionsの `Release Kids Oekaki` workflow（`.github/workflows/release.yml`）を
+   `main` で実行した最新成功runから、
+   `kids-oekaki-<version>-android-<versionCode>` artifactをダウンロードし、
+   中の `kids-oekaki-release.apk` を端末へ転送する（USB / クラウドストレージ等）。
+   旧debug署名APKから初回移行する場合だけ、[docs/ANDROID_DISTRIBUTION.md](ANDROID_DISTRIBUTION.md)
+   の手順に従い、`main` で `include_migration_apk=true` の手動runを使う。
 2. 対象端末で「提供元不明のアプリ」のインストールを一時的に許可する
-   （debug署名APKのため。[docs/ANDROID_DISTRIBUTION.md](ANDROID_DISTRIBUTION.md)参照）。
+   （固定Release署名APKのサイドロードのため。[docs/ANDROID_DISTRIBUTION.md](ANDROID_DISTRIBUTION.md)参照）。
 3. 対象端末は**Android タブレットとKindle Fireタブレットの両方から最低1台ずつ**用意する
    （どちらか一方だけで全項目Passにしない。Kindle固有の挙動を未検証のままDoneにしない）。
    Androidタブレットはできればstylus対応機種を含める。
