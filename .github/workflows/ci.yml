@@ -53,25 +53,15 @@ jobs:
         uses: android-actions/setup-android@v4
       - name: Sync Capacitor Android project
         run: npm run android:sync
-      - name: Assemble debug APK
+      - name: Assemble non-distributable debug APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
         env:
-          # debug build only (docs/ANDROID_DISTRIBUTION.md); unsigned APKs are not installable,
-          # so this uses Capacitor/Android Studio's auto-generated debug keystore.
+          # CI only. This debug APK uses an ephemeral runner key and MUST NOT be
+          # installed as a distributed build. User-installable APK/AAB artifacts
+          # are produced only by release.yml with the persistent Oekaki signing key.
           ANDROID_VERSION_CODE: ${{ github.run_number }}
-      - name: Label APK with version/run for Human Acceptance traceability
-        id: apk
+      - name: Record Android build-check result
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          LABEL="kids-oekaki-v${VERSION}-debug-build${{ github.run_number }}"
-          mkdir -p android/app/build/outputs/apk/debug/labeled
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-             "android/app/build/outputs/apk/debug/labeled/${LABEL}.apk"
-          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.apk.outputs.label }}
-          path: android/app/build/outputs/apk/debug/labeled/${{ steps.apk.outputs.label }}.apk
-          if-no-files-found: error
+          echo "### Android build check" >> "$GITHUB_STEP_SUMMARY"
+          echo "assembleDebug succeeded. No debug APK is published because its ephemeral signature cannot support in-place updates." >> "$GITHUB_STEP_SUMMARY"

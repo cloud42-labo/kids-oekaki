@@ -2,94 +2,385 @@ name: Release Kids Oekaki
 
 on:
   workflow_dispatch:
+    inputs:
+      include_migration_apk:
+        description: 'Generate the one-time debuggable migration APK for restoring existing drawings'
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: 'Optional versioned release tag (must equal v<package.json version>); leave blank for artifact-only manual runs'
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - main
-    paths:
-      - '.github/workflows/release.yml'
-    tags:
-      - 'v*'
+
+# First-attempt main pushes serialize in rolling-main. First-attempt versioned
+# dispatches serialize by release_tag. Reruns and artifact-only dispatches use
+# their own run_id so they cannot evict a newer pending rolling/versioned run.
+concurrency:
+  group: kids-oekaki-release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && 'rolling-main' || github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && inputs.release_tag != '' && format('version-{0}', inputs.release_tag) || github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
+    # workflow_dispatch can select any branch. Never expose persistent signing
+    # secrets to an unreviewed non-main branch; manual release/migration runs are
+    # allowed only from main. Versioned releases are created by a main dispatch,
+    # never by an arbitrary tag push.
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Resolve release version
+
+      - name: Resolve release version and Android versionCode
         id: version
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          INCLUDE_MIGRATION_APK: ${{ inputs.include_migration_apk }}
         shell: bash
         run: |
+          set -euo pipefail
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG="$GITHUB_REF_NAME"
-            if [ "${TAG#v}" != "$PACKAGE_VERSION" ]; then
-              echo "Tag $TAG does not match package.json version $PACKAGE_VERSION"
+
+          if [ -n "$REQUESTED_RELEASE_TAG" ]; then
+            if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ] || [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "Versioned releases may only be requested by workflow_dispatch on main." >&2
               exit 1
             fi
+            if [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
+              echo "Versioned release reruns are not allowed. Start a fresh main dispatch so ordering remains monotonic." >&2
+              exit 1
+            fi
+            if [ "$INCLUDE_MIGRATION_APK" = "true" ]; then
+              echo "Do not attach the debuggable migration APK to a versioned release. Run migration as an artifact-only dispatch." >&2
+              exit 1
+            fi
+            RELEASE_TAG="$REQUESTED_RELEASE_TAG"
+            PUBLISH_RELEASE=true
+            if [ "$RELEASE_TAG" != "v$PACKAGE_VERSION" ]; then
+              echo "Requested release tag $RELEASE_TAG does not match package.json version v$PACKAGE_VERSION" >&2
+              exit 1
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            RELEASE_TAG="latest"
+            PUBLISH_RELEASE=true
           else
-            TAG="v$PACKAGE_VERSION"
+            # Manual main runs without release_tag are artifact-only. This is the
+            # one-time migration path and never mutates the shared latest release.
+            RELEASE_TAG=""
+            PUBLISH_RELEASE=false
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Historical debug APKs used versionCode=1. Reserve a high, monotonic
+          # range for fixed-signed builds. Each workflow run gets two consecutive
+          # codes so the release APK is always newer than its optional migration APK.
+          MIGRATION_CODE=$((100000 + GITHUB_RUN_NUMBER * 2))
+          RELEASE_CODE=$((MIGRATION_CODE + 1))
+
+          echo "package_version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "publish_release=$PUBLISH_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "migration_code=$MIGRATION_CODE" >> "$GITHUB_OUTPUT"
+          echo "release_code=$RELEASE_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate existing version tag target
+        if: ${{ steps.version.outputs.publish_release == 'true' && steps.version.outputs.release_tag != 'latest' }}
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            EXISTING_TARGET="$(git rev-list -n 1 "$RELEASE_TAG")"
+            if [ "$EXISTING_TARGET" != "$GITHUB_SHA" ]; then
+              echo "::error::Refusing to reuse $RELEASE_TAG: it targets $EXISTING_TARGET, not current main commit $GITHUB_SHA."
+              exit 1
+            fi
+          fi
+
+      - name: Validate release signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.OEKAKI_RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not configured for the Kids Oekaki release signing key"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Set OEKAKI_RELEASE_KEYSTORE_BASE64 / STORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD in GitHub Actions Secrets." >&2
+            exit 1
+          fi
+
+      - name: Restore fixed release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.OEKAKI_RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/kids-oekaki-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          keytool -list             -keystore "$KEYSTORE_PATH"             -storepass "$STORE_PASSWORD"             -alias "$KEY_ALIAS"             -keypass "$KEY_PASSWORD" >/dev/null
+          echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
+
       - name: Build PWA
         run: npm run build
+
       - name: E2E tests
         run: |
           npx playwright install --with-deps chromium
           npm run test:e2e
+
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+
       - name: Sync Capacitor Android project
         run: npm run android:sync
-      - name: Assemble debug APK
+
+      - name: Build one-time migration APK
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_migration_apk == true }}
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        env:
+          ANDROID_VERSION_CODE: ${{ steps.version.outputs.migration_code }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
+        run: ./gradlew assembleMigration --no-daemon
+
+      - name: Build fixed-signed release APK and AAB
+        working-directory: android
+        env:
+          ANDROID_VERSION_CODE: ${{ steps.version.outputs.release_code }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease bundleRelease --no-daemon
+
+      - name: Verify APK and AAB signer
+        env:
+          STORE_PASSWORD: ${{ secrets.OEKAKI_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.OEKAKI_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.OEKAKI_RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          normalize() { tr -d ': \r' | tr 'A-Z' 'a-z'; }
+
+          KEYSTORE_SHA1=$(keytool -list -v             -keystore "$ANDROID_KEYSTORE_PATH"             -storepass "$STORE_PASSWORD"             -alias "$KEY_ALIAS"             -keypass "$KEY_PASSWORD"             | grep -E '^[[:space:]]*SHA1:' | head -1 | sed 's/.*SHA1: *//' | normalize)
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner was not found" >&2
+            exit 1
+          fi
+
+          verify_apk() {
+            local apk="$1"
+            local actual
+            actual=$("$APKSIGNER" verify --print-certs "$apk"               | grep -i 'SHA-1 digest' | head -1 | sed 's/.*: *//' | normalize)
+            if [ -z "$actual" ] || [ "$actual" != "$KEYSTORE_SHA1" ]; then
+              echo "::error::$apk is not signed by the fixed Kids Oekaki release key" >&2
+              exit 1
+            fi
+          }
+
+          verify_apk android/app/build/outputs/apk/release/app-release.apk
+          if [ -f android/app/build/outputs/apk/migration/app-migration.apk ]; then
+            verify_apk android/app/build/outputs/apk/migration/app-migration.apk
+          fi
+
+          AAB_SHA1=$(keytool -printcert -jarfile android/app/build/outputs/bundle/release/app-release.aab             | grep -E '^[[:space:]]*SHA1:' | head -1 | sed 's/.*SHA1: *//' | normalize)
+          if [ -z "$AAB_SHA1" ] || [ "$AAB_SHA1" != "$KEYSTORE_SHA1" ]; then
+            echo "::error::release AAB is not signed by the fixed Kids Oekaki release key" >&2
+            exit 1
+          fi
+
+          echo "::notice::Kids Oekaki fixed signer SHA-1 = $KEYSTORE_SHA1"
+
       - name: Package release assets
         shell: bash
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
+          set -euo pipefail
+          cp android/app/build/outputs/apk/release/app-release.apk kids-oekaki-release.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab kids-oekaki-release.aab
+          if [ -f android/app/build/outputs/apk/migration/app-migration.apk ]; then
+            cp android/app/build/outputs/apk/migration/app-migration.apk kids-oekaki-migration.apk
+          fi
+
           cd dist
-          zip -r "../kids-oekaki-${TAG}.zip" .
+          zip -r "../kids-oekaki-web.zip" .
           cd ..
-          cp android/app/build/outputs/apk/debug/app-debug.apk "kids-oekaki-${TAG}-debug.apk"
-      - name: Publish APK as workflow artifact
+
+      - name: Publish Android assets as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kids-oekaki-${{ steps.version.outputs.tag }}-android
-          path: kids-oekaki-${{ steps.version.outputs.tag }}-debug.apk
+          name: kids-oekaki-${{ steps.version.outputs.package_version }}-android-${{ steps.version.outputs.release_code }}
+          path: |
+            kids-oekaki-release.apk
+            kids-oekaki-release.aab
+            kids-oekaki-migration.apk
           if-no-files-found: error
           retention-days: 30
-      - name: Create or update GitHub Release
+
+      - name: Reject stale rolling-release reruns
+        if: ${{ steps.version.outputs.release_tag == 'latest' }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" \
-              "kids-oekaki-${TAG}.zip" \
-              "kids-oekaki-${TAG}-debug.apk" \
-              --clobber
+          set -euo pipefail
+
+          # A rerun keeps its original GITHUB_RUN_NUMBER. Reject it when any newer
+          # main-branch run exists, regardless of whether that newer run is queued,
+          # in progress, successful, failed, or cancelled. This prevents an old rerun
+          # from publishing a lower versionCode after a newer run has been created.
+          latest_main_run="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?branch=main&event=push&per_page=100" \
+              --jq '[.workflow_runs[].run_number] | max // 0' \
+              | sort -nr \
+              | head -1
+          )"
+
+          if [ "$latest_main_run" -gt "$GITHUB_RUN_NUMBER" ]; then
+            echo "::error::Refusing stale rolling-release rerun: current run #$GITHUB_RUN_NUMBER is older than main release run #$latest_main_run."
+            exit 1
+          fi
+
+      - name: Publish rolling/versioned GitHub Release
+        if: ${{ steps.version.outputs.publish_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          RELEASE_CODE: ${{ steps.version.outputs.release_code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$RELEASE_TAG" = "latest" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -f latest "$GITHUB_SHA"
+            git push origin refs/tags/latest --force
+          fi
+
+          {
+            echo "Kids Oekaki v$PACKAGE_VERSION"
+            echo
+            echo "Android versionCode: $RELEASE_CODE"
+            echo
+            echo "The Android APK is signed with the persistent Kids Oekaki release key."
+            echo "Future fixed-signed APKs can be installed as in-place updates without deleting app data."
+            if [ -f kids-oekaki-migration.apk ]; then
+              echo
+              echo "This run also contains kids-oekaki-migration.apk for the one-time migration from the old ephemeral debug-signed APK."
+              echo "Back up existing app data before uninstalling the old APK."
+            fi
+          } > release-notes.md
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG"               --title "$RELEASE_TAG (v$PACKAGE_VERSION, code $RELEASE_CODE)"               --notes-file release-notes.md
           else
-            gh release create "$TAG" \
-              "kids-oekaki-${TAG}.zip" \
-              "kids-oekaki-${TAG}-debug.apk" \
-              --target "$GITHUB_SHA" \
-              --generate-notes \
-              --title "Kids Oekaki $TAG"
+            EXTRA=()
+            if [ "$RELEASE_TAG" = "latest" ]; then
+              EXTRA+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG"               --target "$GITHUB_SHA"               --title "$RELEASE_TAG (v$PACKAGE_VERSION, code $RELEASE_CODE)"               --notes-file release-notes.md               "${EXTRA[@]}"
+          fi
+
+          # Remove any legacy ephemeral-debug APKs left on historical releases.
+          # Fixed-signed release/migration APKs are the only Android installables
+          # that may remain publicly downloadable after this migration.
+          legacy_debug_asset_ids="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | .assets[] | select(.name | test("^kids-oekaki-v.*-debug\\.apk$")) | .id'
+          )"
+          for legacy_asset_id in $legacy_debug_asset_ids; do
+            gh api --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/releases/assets/${legacy_asset_id}"
+          done
+
+          # A migration APK is intentionally one-time. If an earlier rolling run
+          # attached one but this run did not generate it, remove the stale asset so
+          # latest never keeps advertising an obsolete debuggable migration build.
+          if [ ! -f kids-oekaki-migration.apk ]; then
+            stale_migration_asset_id="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+                --jq '.assets[] | select(.name == "kids-oekaki-migration.apk") | .id' \
+                | head -1
+            )"
+            if [ -n "$stale_migration_asset_id" ]; then
+              gh api --method DELETE \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${GITHUB_REPOSITORY}/releases/assets/${stale_migration_asset_id}"
+            fi
+          fi
+
+          ASSETS=(kids-oekaki-release.apk kids-oekaki-release.aab kids-oekaki-web.zip)
+          if [ -f kids-oekaki-migration.apk ]; then
+            ASSETS+=(kids-oekaki-migration.apk)
+          fi
+          gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
+
+          {
+            echo "### Kids Oekaki Android release"
+            echo
+            echo "- versionName: $PACKAGE_VERSION"
+            echo "- versionCode: $RELEASE_CODE"
+            echo "- signing: persistent release key"
+            echo "- APK: kids-oekaki-release.apk"
+            echo "- AAB: kids-oekaki-release.aab"
+            if [ -f kids-oekaki-migration.apk ]; then
+              echo "- migration: kids-oekaki-migration.apk (one-time only)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove signing key from runner
+        if: always()
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_PATH:-}" ]; then
+            rm -f "$ANDROID_KEYSTORE_PATH"
           fi
