@@ -40,8 +40,12 @@ async function canvasColorAt(page: Page, x: number, y: number): Promise<{ r: num
   return { r, g, b };
 }
 
+function isCloseToColor(color: { r: number; g: number; b: number }, expected: { r: number; g: number; b: number }, tolerance = 25) {
+  return Math.abs(color.r - expected.r) <= tolerance && Math.abs(color.g - expected.g) <= tolerance && Math.abs(color.b - expected.b) <= tolerance;
+}
+
 function isCloseToRed(color: { r: number; g: number; b: number }, tolerance = 25) {
-  return Math.abs(color.r - RED.r) <= tolerance && Math.abs(color.g - RED.g) <= tolerance && Math.abs(color.b - RED.b) <= tolerance;
+  return isCloseToColor(color, RED, tolerance);
 }
 
 async function importSamplePhoto(page: Page) {
@@ -416,5 +420,322 @@ test.describe('image asset store (OEK-05-S04-T11)', () => {
     await saveNow(page);
     const assets = await readStore<ImageAssetRow>(page, 'image-assets');
     expect(assets).toHaveLength(1);
+  });
+
+  // --- Codex review findings on PR #27 (OEK-05-S04-T11), reviewed commit
+  // 623290735f0bb84ac6b5b2981bd5f734e82116ce — regression coverage for all
+  // three P1s below. ---
+
+  test('⑥ 移行中に1件のアセット書き込みが失敗(例: quota超過)しても、他の保存データは一覧から消えず開ける', async ({ page }) => {
+    // Overrides crypto.subtle.digest (hashContent, utils/imageAssetStore.ts's
+    // storeImageAsset) to fail for exactly one legacy session's inline data
+    // URL — standing in for a QuotaExceededError from that session's asset
+    // write during migration (documentStorage.ts's listDrawingSessions ->
+    // migrateSessionIfNeeded -> migrateImageAssetsInSession). Registered via
+    // addInitScript so it's active before the app's own script runs on the
+    // reload below, which is when migration actually happens.
+    await page.goto('/');
+    const [poisonedDataUrl, okDataUrl] = await page.evaluate(() => {
+      const make = (color: string) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 2;
+        canvas.height = 2;
+        const ctx = canvas.getContext('2d')!;
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, 2, 2);
+        return canvas.toDataURL('image/png');
+      };
+      return [make('#e03131'), make('#1864ab')];
+    });
+    const POISONED_COLOR = { r: 224, g: 49, b: 49 }; // #e03131
+    const OK_COLOR = { r: 24, g: 100, b: 171 }; // #1864ab
+
+    await page.addInitScript((poisoned) => {
+      const originalDigest = window.crypto.subtle.digest.bind(window.crypto.subtle);
+      window.crypto.subtle.digest = (async (algorithm: AlgorithmIdentifier, data: BufferSource) => {
+        const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array((data as ArrayBufferView).buffer, (data as ArrayBufferView).byteOffset, (data as ArrayBufferView).byteLength);
+        const text = new TextDecoder().decode(bytes);
+        if (text === poisoned) {
+          throw new DOMException('Quota exceeded while migrating (simulated)', 'QuotaExceededError');
+        }
+        return originalDigest(algorithm, data);
+      }) as typeof window.crypto.subtle.digest;
+    }, poisonedDataUrl);
+
+    const poisonedId = 'quota-fail-session-1';
+    const poisonedLayerId = 'quota-fail-sketch';
+    await seedRawSession(page, `draft:${poisonedId}`, {
+      schemaVersion: 3,
+      id: poisonedId,
+      name: 'quota-fail',
+      savedAt: new Date().toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: DOC_WIDTH,
+          height: DOC_HEIGHT,
+          orientation: 'portrait',
+          template: 'blank',
+          activeLayerId: poisonedLayerId,
+          layers: [
+            {
+              id: poisonedLayerId,
+              name: 'したがき',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              kind: 'draft',
+              objects: [
+                { id: 'quota-fail-image', type: 'image', src: poisonedDataUrl, x: 250, y: 415.5, width: 300, height: 300 },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const okId = 'quota-ok-session-1';
+    const okLayerId = 'quota-ok-sketch';
+    await seedRawSession(page, `draft:${okId}`, {
+      schemaVersion: 3,
+      id: okId,
+      name: 'quota-ok',
+      savedAt: new Date(Date.now() - 1000).toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: DOC_WIDTH,
+          height: DOC_HEIGHT,
+          orientation: 'portrait',
+          template: 'blank',
+          activeLayerId: okLayerId,
+          layers: [
+            {
+              id: okLayerId,
+              name: 'したがき',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              kind: 'draft',
+              objects: [
+                { id: 'quota-ok-image', type: 'image', src: okDataUrl, x: 250, y: 415.5, width: 300, height: 300 },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    await page.reload();
+
+    // Both sessions must still be listed — the poisoned one's migration
+    // failure must not have rejected the whole listing (the exact bug this
+    // finding targets: a single QuotaExceededError discarding every saved
+    // session, including ones that didn't even need migration).
+    await expect(page.locator('.saved-work-row')).toHaveCount(2);
+
+    // Required fix: don't mark a session as migrated when it wasn't
+    // actually migrated. Checked here, before either session is opened —
+    // simply viewing a saved session makes it the active one and (via
+    // App.tsx's own, pre-existing autosave-on-change effect) schedules an
+    // ordinary re-save a moment later regardless of whether anything was
+    // edited, which would legitimately persist the (unrelated) *current*
+    // SCHEMA_VERSION over whatever was read — that later re-save is not
+    // what this assertion is about, so it must run first. The poisoned
+    // session's raw record must still be exactly as it was seeded
+    // (schemaVersion 3, inline data URL) — not relabeled to schemaVersion 4
+    // with a half-applied migration — while the unaffected one did get
+    // fully migrated.
+    const sessionsBeforeOpening = await readStore<RawSessionRow & { id: string }>(page, 'drawing-sessions');
+    const poisonedRow = sessionsBeforeOpening.find((row) => row.id === poisonedId)!;
+    expect(poisonedRow.schemaVersion).toBe(3);
+    expect(collectImageSrcs(poisonedRow)[0]).toBe(poisonedDataUrl);
+    const okRow = sessionsBeforeOpening.find((row) => row.id === okId)!;
+    expect(okRow.schemaVersion).toBe(4);
+    expect(collectImageSrcs(okRow)[0].startsWith('asset:')).toBe(true);
+
+    // The un-migrated (poisoned) session must still be openable and still
+    // render its photo correctly, through its original, un-migrated inline
+    // data: URL (resolveImageSrc passes a non-asset: src through unchanged).
+    await page.locator('.saved-work-row', { hasText: 'quota-fail' }).locator('.saved-work-open').click();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2), POISONED_COLOR)).toBe(true);
+
+    // Back to the start screen via reload (not the in-app "戻る" button) so
+    // the schemaVersion assertions above stay about the migration step
+    // itself, unaffected by the ordinary autosave this page's own open just
+    // scheduled.
+    await page.reload();
+
+    // The other, unaffected session must also still be listed and openable.
+    await page.locator('.saved-work-row', { hasText: 'quota-ok' }).locator('.saved-work-open').click();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
+    await expect.poll(async () => isCloseToColor(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2), OK_COLOR)).toBe(true);
+  });
+
+  test('⑦ アセットに存在しない参照(ダングリング)を開いても、解決の再試行は無限に続かず安定する', async ({ page }) => {
+    // Counts every read against the 'image-assets' store (the asset lookup
+    // engine/renderer.ts's resolveImageSrc/getImageAssetDataUrl performs).
+    // Registered before the app's own script runs, so it captures every
+    // read from the very first render of the dangling reference onward.
+    await page.addInitScript(() => {
+      (window as unknown as { __assetReadCount: number }).__assetReadCount = 0;
+      const originalGet = IDBObjectStore.prototype.get;
+      IDBObjectStore.prototype.get = function (this: IDBObjectStore, ...args: Parameters<typeof originalGet>) {
+        if (this.name === 'image-assets') {
+          const w = window as unknown as { __assetReadCount: number };
+          w.__assetReadCount = (w.__assetReadCount ?? 0) + 1;
+        }
+        return originalGet.apply(this, args);
+      };
+    });
+
+    await page.goto('/');
+    const id = 'dangling-loop-session-1';
+    const layerId = 'dangling-loop-sketch';
+    await seedRawSession(page, `draft:${id}`, {
+      schemaVersion: 4,
+      id,
+      name: 'dangling-loop',
+      savedAt: new Date().toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: DOC_WIDTH,
+          height: DOC_HEIGHT,
+          orientation: 'portrait',
+          template: 'blank',
+          activeLayerId: layerId,
+          layers: [
+            {
+              id: layerId,
+              name: 'したがき',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              kind: 'draft',
+              objects: [
+                {
+                  id: 'dangling-loop-image',
+                  type: 'image',
+                  // No matching row in 'image-assets' — see test ③ above
+                  // for why this can never resolve.
+                  src: 'asset:1111111111111111111111111111111111111111111111111111111111111111',
+                  x: 250,
+                  y: 415.5,
+                  width: 300,
+                  height: 300,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await page.reload();
+
+    await page.locator('.saved-work-row', { hasText: 'dangling-loop' }).locator('.saved-work-open').click();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
+
+    // Before the fix, engine/renderer.ts's getImageElement's
+    // resolution-rejection handler called onReady unconditionally, which
+    // re-rendered, re-encountered the same unresolved object, and created a
+    // brand-new resolution request — an unbounded loop of IndexedDB reads
+    // that never stops on its own. Sampling the counter at two points, a
+    // couple of seconds apart, distinguishes that (still climbing) from the
+    // fix (flat after the first failure).
+    await page.waitForTimeout(1500);
+    const countAfterSettling = await page.evaluate(() => (window as unknown as { __assetReadCount: number }).__assetReadCount ?? 0);
+    expect(countAfterSettling).toBeGreaterThan(0);
+
+    await page.waitForTimeout(2500);
+    const countLater = await page.evaluate(() => (window as unknown as { __assetReadCount: number }).__assetReadCount ?? 0);
+    expect(countLater).toBe(countAfterSettling);
+
+    // Still no crash, still usable — same baseline as test ③.
+    await expect(page.locator('.layer-row', { hasText: 'したがき' })).toBeVisible();
+  });
+
+  test('⑧ 取り込み直後の画像は、保存が完了する前に別タブの保存(GC)が走っても削除されない', async ({ context }) => {
+    test.setTimeout(60_000);
+    const pageA = await context.newPage();
+    await startBlankDrawing(pageA);
+    await importSamplePhoto(pageA);
+
+    const assetsAfterImport = await readStore<ImageAssetRow>(pageA, 'image-assets');
+    expect(assetsAfterImport).toHaveLength(1);
+    const assetId = assetsAfterImport[0].id;
+
+    // Keep mutating page A's in-memory document continuously — never
+    // leaving the autosave debounce (1.2s — App.tsx#L153-158) a quiet gap
+    // long enough to actually fire a save — for longer than the asset's
+    // fixed creation-time grace period (10s — DEFAULT_GC_GRACE_MS in
+    // utils/imageAssetStore.ts). This reproduces the window where the
+    // freshly imported photo is referenced only by this tab's live,
+    // unsaved document: nothing persisted anywhere references it yet.
+    const editDeadline = Date.now() + 11_000;
+    let dx = 60;
+    while (Date.now() < editDeadline) {
+      await dragImage(
+        pageA,
+        { x: DOC_WIDTH / 2, y: DOC_HEIGHT / 2 },
+        { x: DOC_WIDTH / 2 + dx, y: DOC_HEIGHT / 2 },
+      );
+      dx = -dx;
+      await pageA.waitForTimeout(500);
+    }
+
+    // From a second, independent tab (same browser profile — real
+    // multi-tab use, so same IndexedDB) — save an unrelated drawing.
+    // documentStorage.ts's saveDrawingSession runs a GC pass immediately
+    // afterward: this is the race page A's still-unsaved photo must
+    // survive.
+    const pageB = await context.newPage();
+    await startBlankDrawing(pageB);
+    await saveNow(pageB);
+    await pageB.close();
+
+    // The asset must still exist immediately after that GC pass — before
+    // the fix, it would already be gone here: unreferenced by any
+    // persisted session and older than the grace period.
+    const assetsAfterOtherTabGc = await readStore<ImageAssetRow>(pageA, 'image-assets');
+    expect(assetsAfterOtherTabGc.some((a) => a.id === assetId)).toBe(true);
+
+    // Now let page A's own save actually land — via the manual save button
+    // (saveNow) rather than waiting on the passive autosave timer: the
+    // autosave path (saveCurrent(false)) deliberately skips the
+    // saveState/'保存済' UI feedback (showProgress=false — see App.tsx), so
+    // it gives this test nothing observable to wait on. Which path persists
+    // the reference doesn't matter for what this test is about (whether the
+    // asset survived the earlier cross-tab GC race) — only that it does,
+    // now, while the asset is still exactly as leaseImageAssetsInHistory
+    // last left it.
+    await saveNow(pageA);
+
+    // Reload and confirm the photo is still there — try each saved-work
+    // card (page B's unrelated blank drawing shares this same IndexedDB and
+    // is also listed) and look for the one that actually shows the photo,
+    // rather than assuming list order.
+    await pageA.reload();
+    const openButtons = pageA.locator('.saved-work-open');
+    await expect(openButtons).toHaveCount(2);
+    let foundPhoto = false;
+    for (let i = 0; i < 2; i += 1) {
+      await openButtons.nth(i).click();
+      await expect(pageA.locator('.creative-toolbar')).toBeVisible();
+      if (await isCloseToRed(await canvasColorAt(pageA, DOC_WIDTH / 2, DOC_HEIGHT / 2))) {
+        foundPhoto = true;
+        break;
+      }
+      await pageA.getByRole('button', { name: '開始画面へ戻る' }).click();
+    }
+    expect(foundPhoto).toBe(true);
+
+    // And the asset itself is still there, now also properly referenced by
+    // page A's own persisted session.
+    const assetsAfterOwnSave = await readStore<ImageAssetRow>(pageA, 'image-assets');
+    expect(assetsAfterOwnSave.some((a) => a.id === assetId)).toBe(true);
   });
 });

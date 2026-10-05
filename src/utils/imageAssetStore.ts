@@ -29,6 +29,15 @@ export type ImageAssetRecord = {
   // comment for why a brand-new asset must not be eligible for collection
   // yet even if no saved session happens to reference it at this instant.
   createdAt: number;
+  // Durable lease, renewed by leaseImageAssetsInHistory() below for every
+  // asset: reference reachable from the *live, in-memory* document — not
+  // just what's actually persisted to IndexedDB yet. Optional/absent on
+  // every record this build ever wrote before this field existed (and on
+  // one that simply hasn't been renewed recently): garbageCollectImageAssets
+  // then falls back to the createdAt-based grace period alone, exactly as
+  // before. See garbageCollectImageAssets' own comment for why a fixed grace
+  // period isn't enough on its own.
+  leasedUntil?: number;
 };
 
 export function isAssetRef(src: string): boolean {
@@ -196,11 +205,88 @@ export async function migrateImageAssetsInSession<T extends { history: HistoryLi
 // see a freshly-created asset with no session referencing it yet and delete
 // it, turning the image into a dangling reference the moment its own save
 // finally lands. 10s is comfortably larger than that debounce plus a slow
-// IndexedDB write in any single tab; it can't fully rule out a pathological
-// multi-tab race, but that's an accepted trade-off for a local, single-device
-// kids' drawing app rather than building full cross-tab-transactional
-// reference counting for it.
+// IndexedDB write in any single tab.
+//
+// This alone is still only a FIXED window from creation, not from "last time
+// anything needed it": if the user keeps actively editing (drawing, moving
+// the photo, etc.) for longer than 10s without an autosave actually landing
+// — a perfectly normal thing for a child to do — the asset ages out of this
+// grace period while still being referenced only by that tab's live,
+// in-memory, unsaved document. A GC pass triggered by a SAVE IN A DIFFERENT
+// TAB at that point would see no persisted reference anywhere and delete it
+// out from under the first tab, permanently losing the photo the moment its
+// own save eventually lands as a now-dangling reference (Codex review
+// finding, PR #27). leasedUntil (set by leaseImageAssetsInHistory below) is
+// the fix for that gap specifically: a durable, cross-tab-visible signal of
+// "some live document still needs this", renewed on every edit rather than
+// only checked once at creation.
 const DEFAULT_GC_GRACE_MS = 10_000;
+
+// How long a lease (see ImageAssetRecord.leasedUntil) protects an asset
+// after its last renewal. App.tsx renews it on every document change (no
+// debounce), so this only needs to bridge the gap *between* two such
+// changes — comfortably more than the autosave debounce (1.2s — App.tsx)
+// plus a slow IndexedDB write, not a second, independent grace period of
+// its own. Deliberately kept well UNDER DEFAULT_GC_GRACE_MS above: once a
+// document (and whatever it referenced) is genuinely abandoned — the
+// session deleted, or simply never touched again — this lease must expire
+// well before DEFAULT_GC_GRACE_MS's own window closes, so an orphaned
+// asset still becomes collectible on the ordinary schedule instead of
+// being kept alive by a stale lease nobody is renewing any more. A lease
+// is "this is still being actively edited right now", not "keep this
+// forever" or "keep the original grace period's deadline open longer".
+const DEFAULT_LEASE_MS = 5_000;
+
+function collectImageAssetRefsInDocument(doc: DrawingDocument, into: Set<string>): void {
+  for (const layer of doc.layers) {
+    for (const object of layer.objects) {
+      if (object.type === 'image' && isAssetRef(object.src)) into.add(object.src);
+    }
+  }
+}
+
+// Every asset: reference reachable from a live (not-necessarily-persisted)
+// DrawingHistory — past/present/future, same reachability rule
+// migrateImageAssetsInSession and collectReferencedAssetIds (below) already
+// use for persisted sessions, applied here to the in-memory document a
+// React component (App.tsx) holds instead.
+function collectImageAssetRefsInHistory(history: HistoryLike): Set<string> {
+  const refs = new Set<string>();
+  history.past.forEach((doc) => collectImageAssetRefsInDocument(doc, refs));
+  collectImageAssetRefsInDocument(history.present, refs);
+  history.future.forEach((doc) => collectImageAssetRefsInDocument(doc, refs));
+  return refs;
+}
+
+// Renews (or sets, for a never-before-leased asset) leasedUntil on every
+// asset still reachable from `history` — see collectImageAssetRefsInHistory
+// above. Called by App.tsx on every live document change (no debounce,
+// unlike the autosave timer it sits alongside) so an actively edited
+// document's assets stay leased continuously, independent of whether/when
+// that document's own autosave actually lands. A dangling reference (no
+// matching row — e.g. one already GC'd, or a still-seeding fixture in a
+// test) is silently skipped: there's no record to extend a lease on, and
+// this must never be the thing that first creates one. Writes are skipped
+// entirely for a ref already leased at least this far into the future, so
+// an idle document with no new edits doesn't re-write every one of its
+// assets' records on every unrelated call.
+export async function leaseImageAssetsInHistory(history: HistoryLike, leaseMs: number = DEFAULT_LEASE_MS): Promise<void> {
+  const refs = collectImageAssetRefsInHistory(history);
+  if (refs.size === 0) return;
+  const db = await openDb();
+  try {
+    const until = Date.now() + leaseMs;
+    for (const ref of refs) {
+      const id = assetIdFromRef(ref);
+      const existing = await getAsset(db, id);
+      if (!existing) continue;
+      if (existing.leasedUntil !== undefined && existing.leasedUntil >= until) continue;
+      await putAsset(db, { ...existing, leasedUntil: until });
+    }
+  } finally {
+    db.close();
+  }
+}
 
 function readAllDrawingSessions(db: IDBDatabase): Promise<unknown[]> {
   return new Promise((resolve, reject) => {
@@ -281,7 +367,16 @@ export async function garbageCollectImageAssets(graceMs: number = DEFAULT_GC_GRA
     const liveIds = collectReferencedAssetIds(sessions);
     const now = Date.now();
     const toDelete = assets
-      .filter((asset) => !liveIds.has(asset.id) && now - asset.createdAt >= graceMs)
+      .filter((asset) => {
+        if (liveIds.has(asset.id)) return false; // referenced by a persisted session
+        if (now - asset.createdAt < graceMs) return false; // too new to judge yet
+        // A still-active lease (leaseImageAssetsInHistory above) means some
+        // tab's live, in-memory document still needs this asset even though
+        // nothing persisted references it yet — see DEFAULT_LEASE_MS's own
+        // comment for the race this closes.
+        if (asset.leasedUntil !== undefined && now < asset.leasedUntil) return false;
+        return true;
+      })
       .map((asset) => asset.id);
     await deleteImageAssets(db, toDelete);
     return toDelete.length;

@@ -324,7 +324,27 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
         .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
         .map(async ({ key, value: rawValue }) => {
           validateHistory(rawValue.history);
-          const value = await migrateSessionIfNeeded(db, key, rawValue);
+          // migrateSessionIfNeeded can fail independently of whether
+          // rawValue itself is readable — most importantly a
+          // QuotaExceededError from migrateImageAssetsInSession's own
+          // storeImageAsset write into image-assets, which happens *before*
+          // the inline data-URL copies it's replacing are freed (so
+          // migrating one session temporarily needs room for both copies at
+          // once — exactly the population already near quota that this
+          // whole PR targets). Letting that throw propagate out of this
+          // map() would reject the surrounding Promise.all and discard
+          // EVERY session's listing, including ones that didn't even need
+          // migration (Codex review finding, PR #27). rawValue is still
+          // exactly as valid/readable as it was before this attempt —
+          // upgradeSchemaVersion is label-only and
+          // migrateImageAssetsInSession never mutates its input in place (it
+          // always returns a new object when something changed; see its own
+          // comment) — so falling back to it here is safe: this session
+          // just stays visible in its old, still-working (inline data URL
+          // and/or pre-upgrade schemaVersion) form, un-migrated and
+          // un-persisted, and migration is simply retried the next time this
+          // session loads.
+          const value = await migrateSessionIfNeeded(db, key, rawValue).catch(() => rawValue);
           return {
             ...value,
             name: normalizeName(value.name, value.history, value.savedAt),
