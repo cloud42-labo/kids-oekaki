@@ -12,6 +12,7 @@ import { useDrawingDocument } from './state/useDrawingDocument';
 import { deleteDrawingSession, listDrawingSessions, renameDrawingSession, saveDrawingSession } from './utils/documentStorage';
 import type { StoredDrawingSession } from './utils/documentStorage';
 import { exportPng } from './utils/exportPng';
+import { garbageCollectImageAssets } from './utils/imageAssetStore';
 import { loadDraftImageFile } from './utils/importImage';
 import './save-resume.css';
 import './creative-ui.css';
@@ -111,6 +112,13 @@ export default function App() {
       .catch((error: unknown) => {
         if (!cancelled) setStorageError(error instanceof Error ? error.message : '保存した作品を読めませんでした');
       });
+    // Best-effort cleanup of image-asset bytes (utils/imageAssetStore.ts)
+    // orphaned by a previous session (e.g. a drawing that was cleared/
+    // deleted but whose last save/delete never got the chance to run its
+    // own GC pass — the app being closed/crashed mid-operation). Not tied
+    // to `cancelled`/unmount: this is a one-off maintenance pass, not
+    // something that needs to update this component's state.
+    void garbageCollectImageAssets().catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 

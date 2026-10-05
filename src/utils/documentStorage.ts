@@ -1,10 +1,9 @@
 import type { ToolSettings } from '../domain/drawing';
 import { preloadDocumentImages, renderDocument } from '../engine/renderer';
 import type { DrawingHistory } from '../state/useDrawingDocument';
+import { SESSIONS_STORE as STORE_NAME, openDb } from './db';
+import { garbageCollectImageAssets, migrateImageAssetsInSession } from './imageAssetStore';
 
-const DB_NAME = 'kids-oekaki';
-const DB_VERSION = 1;
-const STORE_NAME = 'drawing-sessions';
 const LEGACY_CURRENT_KEY = 'current';
 const DRAFT_PREFIX = 'draft:';
 // v2: pre-draft-image-import format (every DrawingObject is a
@@ -19,7 +18,19 @@ const DRAFT_PREFIX = 'draft:';
 // SCHEMA_VERSION means a v2-only build's own (unchanged) strict `!==` guard
 // below now rejects a v3 document outright — "この保存データは新しい形式です"
 // — instead of misreading it.
-const SCHEMA_VERSION = 3;
+// v4 (OEK-05-S04-T11): ImageObject.src may now be an "asset:<hash>"
+// reference into IMAGE_ASSETS_STORE instead of an inline data URL (see
+// utils/imageAssetStore.ts). A v3-only build would pass that string straight
+// to an <img>.src, which the browser treats as an unrecognized protocol —
+// the photo would silently fail to load instead of being misread, but it's
+// still exactly the "a client that doesn't know this new ImageObject detail
+// must refuse the document, not guess" situation the v2→v3 bump above
+// already defends against, so the same strict-rejection guard applies here.
+// migrateSessionIfNeeded() below both converts a v3 document's inline data
+// URLs to asset: references AND relabels it to v4 in the same write, so a v4
+// label always implies "every ImageObject.src in this session is an asset:
+// reference" — never a half-migrated mix.
+const SCHEMA_VERSION = 4;
 // Oldest schemaVersion this build still reads (and upgrades on load). Only
 // v2 predates this build; anything older already got folded into v2 by
 // migrateLegacyCurrent() below before it could reach the versioned
@@ -43,18 +54,6 @@ type LegacyStoredDrawingSession = {
   savedAt: string;
   history: DrawingHistory;
 };
-
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('保存場所を開けませんでした'));
-  });
-}
 
 function validateHistory(history: DrawingHistory | undefined) {
   if (!history?.present || !Array.isArray(history.past) || !Array.isArray(history.future)) {
@@ -177,6 +176,27 @@ async function deleteValue(db: IDBDatabase, key: IDBValidKey): Promise<void> {
   });
 }
 
+// Combines the two independent migrations a loaded session may need: its
+// top-level schemaVersion label (upgradeSchemaVersion, structural/label-only)
+// and its ImageObject.src values across every history snapshot
+// (migrateImageAssetsInSession, utils/imageAssetStore.ts — rewrites a legacy
+// inline data URL into a short asset: reference). Persists the result back
+// to IndexedDB (so the migration — and the storage it frees — isn't redone
+// on every future load) only when something actually changed; an
+// already-current session round-trips through this as a no-op write-free
+// read, same as before this function existed.
+async function migrateSessionIfNeeded(
+  db: IDBDatabase,
+  key: IDBValidKey,
+  rawValue: StoredDrawingSession,
+): Promise<StoredDrawingSession> {
+  const schemaUpgraded = upgradeSchemaVersion(rawValue); // throws if unreadable
+  const { session: imagesMigrated, migrated: imagesChanged } = await migrateImageAssetsInSession(schemaUpgraded);
+  if (schemaUpgraded === rawValue && !imagesChanged) return rawValue;
+  await putValue(db, key, imagesMigrated);
+  return imagesMigrated;
+}
+
 function migrateLegacyCurrent(db: IDBDatabase): Promise<StoredDrawingSession | null> {
   // read → copy → delete must happen in a single readwrite transaction so a
   // concurrent call (React StrictMode double-mount, a second tab) can never
@@ -227,9 +247,10 @@ export async function saveDrawingSession(
 ): Promise<StoredDrawingSession> {
   const db = await openDb();
   const savedAt = new Date().toISOString();
+  let session: StoredDrawingSession;
   try {
     const existing = await readValue<StoredDrawingSession>(db, `${DRAFT_PREFIX}${id}`);
-    const session: StoredDrawingSession = {
+    session = {
       schemaVersion: SCHEMA_VERSION,
       id,
       name: normalizeName(name ?? existing?.name, history, savedAt),
@@ -239,9 +260,27 @@ export async function saveDrawingSession(
       thumbnail: await createThumbnailAsync(history),
     };
     await putValue(db, `${DRAFT_PREFIX}${id}`, session);
-    return session;
   } finally {
     db.close();
+  }
+  // Runs after this session's own write has committed and its connection
+  // closed (garbageCollectImageAssets opens its own via
+  // utils/imageAssetStore.ts's openDb()), so this save's own newly
+  // referenced assets are already visible to the mark-and-sweep scan — see
+  // that function's own comment, and its grace period, for why this is safe
+  // even though it also scans every *other* saved session.
+  await runGarbageCollectionSafely();
+  return session;
+}
+
+async function runGarbageCollectionSafely(): Promise<void> {
+  try {
+    await garbageCollectImageAssets();
+  } catch {
+    // Best-effort cleanup only — a failed GC pass must never surface as a
+    // save/delete failure to the user; it just means some orphaned image
+    // bytes linger until the next successful pass (saveDrawingSession,
+    // deleteDrawingSession, or App.tsx's startup effect all trigger one).
   }
 }
 
@@ -283,9 +322,9 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
     const sessions = await Promise.all(
       entries
         .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
-        .map(async ({ value: rawValue }) => {
-          const value = upgradeSchemaVersion(rawValue);
-          validateHistory(value.history);
+        .map(async ({ key, value: rawValue }) => {
+          validateHistory(rawValue.history);
+          const value = await migrateSessionIfNeeded(db, key, rawValue);
           return {
             ...value,
             name: normalizeName(value.name, value.history, value.savedAt),
@@ -302,10 +341,11 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
 export async function loadDrawingSession(id: string): Promise<StoredDrawingSession | null> {
   const db = await openDb();
   try {
-    const rawValue = await readValue<StoredDrawingSession>(db, `${DRAFT_PREFIX}${id}`);
+    const key = `${DRAFT_PREFIX}${id}`;
+    const rawValue = await readValue<StoredDrawingSession>(db, key);
     if (!rawValue) return null;
-    const value = upgradeSchemaVersion(rawValue);
-    validateHistory(value.history);
+    validateHistory(rawValue.history);
+    const value = await migrateSessionIfNeeded(db, key, rawValue);
     return {
       ...value,
       name: normalizeName(value.name, value.history, value.savedAt),
@@ -323,4 +363,8 @@ export async function deleteDrawingSession(id: string): Promise<void> {
   } finally {
     db.close();
   }
+  // Deleting a whole session can orphan every image it referenced — see
+  // saveDrawingSession's own call for why this runs after the connection
+  // above has closed.
+  await runGarbageCollectionSafely();
 }

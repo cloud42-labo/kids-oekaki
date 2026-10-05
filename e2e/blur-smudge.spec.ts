@@ -216,7 +216,7 @@ async function seedSessionWithBlur(page: Page, algorithm: 'smudge' | undefined) 
       history,
     };
     await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');

@@ -32,7 +32,7 @@ test('ミラー描画で生まれる鉛筆strokeペアは、idは別だがseed�
 
   const objects = await page.evaluate(() => {
     return new Promise<Array<{ id: string; seed?: string; brush: string }>>((resolve, reject) => {
-      const req = indexedDB.open('kids-oekaki', 1);
+      const req = indexedDB.open('kids-oekaki');
       req.onsuccess = () => {
         const db = req.result;
         const tx = db.transaction('drawing-sessions', 'readonly');

@@ -152,7 +152,7 @@ test.describe('鉛筆・筆ツールの追加とスタンプ作成UIの廃止', 
         history,
       };
       await new Promise<void>((resolve, reject) => {
-        const request = indexedDB.open('kids-oekaki', 1);
+        const request = indexedDB.open('kids-oekaki');
         request.onupgradeneeded = () => {
           const db = request.result;
           if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');
