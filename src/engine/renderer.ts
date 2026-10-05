@@ -1,6 +1,15 @@
-import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, ImageObject, Point, StrokeObject } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, FillObject, ImageObject, Point, StrokeObject } from '../domain/drawing';
 import { IMAGE_HANDLE_VISUAL_RADIUS } from '../domain/drawing';
 import { drawTemplate } from '../domain/templates';
+import type { SelectionPoint } from '../domain/selection';
+import { buildClosedSelectionPath } from '../domain/selection';
+
+// 選択範囲の境界線オーバーレイ(OEK-05-S04-T06)。ドラッグ中(closed:false、
+// 投げ縄の先端はまだ開いたまま)・確定後(closed:true、始点と終点を結んで
+// 閉じる)のどちらも同じ形で表現し、renderDocumentの最後でImageSelectionの
+// chromeと同じ扱いで重ねて描く。Document(保存データ)には含めない、
+// CanvasStage側のその場のUI状態。
+export type SelectionOverlay = { points: SelectionPoint[]; closed: boolean };
 
 export type ImageBox = { x: number; y: number; width: number; height: number };
 // While an image is selected (CanvasStage, 'image' tool mode), its box —
@@ -285,6 +294,48 @@ function drawImageSelectionChrome(target: CanvasRenderingContext2D, box: ImageBo
   target.strokeStyle = '#ffffff';
   target.stroke();
   target.restore();
+}
+
+// ドラッグ中・確定後どちらの状態でも使う投げ縄選択の境界線。closed=falseは
+// 投げ縄の先端(最後の点)をまだ始点へ結ばず、ドラッグの軌跡そのままを描く。
+// closed=trueは確定済みの選択で、始点と終点を結んで閉じる。
+//
+// 破線のストロークだけで、内側を半透明色で塗る(塗りつぶす)ことはしない
+// ――塗った後も選択を保持する(App.tsxのfillSelection参照、同じ範囲へ
+// 色を変えて重ね塗りできるようにするため)ので、選択中はいつでも画面上に
+// このオーバーレイが乗る。半透明の塗りを重ねると、せっかく塗った色が
+// 選択を解除するまで常に色味がズレて見えてしまう(「塗った結果がすぐには
+// 見えない」という体験上の問題になる)ため、境界線(ImageSelectionの
+// chromeと同じ、枠線のみ)に留める。
+function drawSelectionChrome(target: CanvasRenderingContext2D, overlay: SelectionOverlay) {
+  if (overlay.points.length === 0) return;
+  target.save();
+  target.globalAlpha = 1;
+  target.setLineDash([10, 8]);
+  target.lineWidth = 3;
+  target.strokeStyle = '#3b82f6';
+  target.beginPath();
+  target.moveTo(overlay.points[0].x, overlay.points[0].y);
+  for (let i = 1; i < overlay.points.length; i += 1) target.lineTo(overlay.points[i].x, overlay.points[i].y);
+  if (overlay.closed) target.closePath();
+  target.stroke();
+  target.setLineDash([]);
+  target.restore();
+}
+
+// 選択範囲(FillObject.path)の内側だけを現在の色で塗る。
+// buildClosedSelectionPathが返すPath2Dへfill()するだけで、canvasの
+// fill()自体がパスの外側には一切描画しないため、追加のクリップや
+// ピクセル単位の判定なしに「選択範囲の外は絶対に変更しない」という
+// 受け入れ基準を満たす。
+function drawFill(ctx: CanvasRenderingContext2D, object: FillObject) {
+  if (object.path.length < 3) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = object.color;
+  ctx.fill(buildClosedSelectionPath(object.path));
+  ctx.restore();
 }
 
 function rainbowColor(hue: number) {
@@ -866,6 +917,7 @@ function renderObject(ctx: CanvasRenderingContext2D, object: DrawingObject, widt
   if (object.type === 'stroke') drawStroke(ctx, object);
   else if (object.type === 'blur') applyBlur(ctx, object, width, height);
   else if (object.type === 'stamp') drawStamp(ctx, object);
+  else if (object.type === 'fill') drawFill(ctx, object);
   // 'image' objects are intentionally never rasterized into the cached
   // layer surface — see the image-drawing loop in renderDocument below.
 }
@@ -1151,7 +1203,11 @@ export function renderDocument(
   // `{ prune: false }` to opt out; the live editor's own calls (both here in
   // CanvasStage's render effect) keep the default so normal eviction still
   // happens on every real document mutation.
-  options?: { prune?: boolean },
+  // selectionOverlayもoptionsへ同居させる(位置引数を増やさず、既存呼び出し元
+  // ――documentStorage.tsのcreateThumbnail/exportPng.tsの
+  // `renderDocument(ctx, document, null, null, { prune: false })`――を
+  // そのまま壊さないため)。省略時・null時は何も重ねない。
+  options?: { prune?: boolean; selectionOverlay?: SelectionOverlay | null },
 ) {
   if (options?.prune !== false) {
     pruneLayerCache(document);
@@ -1248,4 +1304,5 @@ export function renderDocument(
   }
 
   if (imageSelection) drawImageSelectionChrome(target, imageSelection);
+  if (options?.selectionOverlay) drawSelectionChrome(target, options.selectionOverlay);
 }

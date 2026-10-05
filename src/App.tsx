@@ -6,6 +6,7 @@ import { LayerPanel } from './components/LayerPanel';
 import { StartScreen } from './components/StartScreen';
 import { Toolbar } from './components/Toolbar';
 import type { ImageObject, MangaPresetKind, Orientation, TemplateKind, ToolSettings } from './domain/drawing';
+import type { SelectionPoint } from './domain/selection';
 import { preloadDocumentImages } from './engine/renderer';
 import type { ImageBox } from './engine/renderer';
 import { useDrawingDocument } from './state/useDrawingDocument';
@@ -63,6 +64,10 @@ export default function App() {
   });
   const [settings, setSettings] = useState<ToolSettings>(DEFAULT_SETTINGS);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
+  // 投げ縄選択(settings.mode === 'selection')の確定済み範囲。mirrorEnabledと
+  // 同じく、その場のUI状態としてのみ扱う(保存データのschemaには含めない)。
+  // 選択を使って確定した色塗りだけがFillObjectとしてdrawing.documentへ残る。
+  const [selectionPath, setSelectionPath] = useState<SelectionPoint[] | null>(null);
   const [imageImportError, setImageImportError] = useState<string>();
   // importImage() below decodes a picked photo asynchronously; if the user
   // returns to the start screen and opens/starts a different document before
@@ -153,6 +158,7 @@ export default function App() {
     drawing.reset(template, orientation, mangaPreset);
     setSettings(DEFAULT_SETTINGS);
     setSelectedImageId(null);
+    setSelectionPath(null);
     setMirrorEnabled(false);
     setActiveSession(crypto.randomUUID());
     setSaveState('idle');
@@ -165,6 +171,7 @@ export default function App() {
     drawing.restoreHistory(session.history);
     setSettings(normalizeRestoredSettings(session.settings ?? DEFAULT_SETTINGS));
     setSelectedImageId(null);
+    setSelectionPath(null);
     setMirrorEnabled(false);
     setActiveSession(session.id);
     setSaveState('saved');
@@ -213,6 +220,23 @@ export default function App() {
   const updateImage = (id: string, box: ImageBox) => {
     drawing.updateImageObject(id, box);
   };
+
+  // 投げ縄選択で確定した範囲(selectionPath)を現在の色で塗る。strokeや
+  // blurと同じく1回のhistory push(=1 Undo/Redo単位)としてcommitFillへ
+  // 渡すだけ。選択自体はFillを押した後も保持する(同じ範囲へ色を変えて
+  // 重ね塗りできるよう、意図的に解除しない)――解除は「かいじょ」ボタン
+  // (deselectSelection)でのみ行う。
+  const fillSelection = () => {
+    if (!selectionPath) return;
+    drawing.commitFill({
+      id: crypto.randomUUID(),
+      type: 'fill',
+      color: settings.color,
+      path: selectionPath,
+    });
+  };
+
+  const deselectSelection = () => setSelectionPath(null);
 
   // Whether the current document already has an imported photo anywhere —
   // drives Toolbar's photo button: once one exists, the button re-enters
@@ -329,6 +353,9 @@ export default function App() {
         onImportImage={(file) => void importImage(file)}
         hasDraftImage={hasDraftImage}
         saveState={saveState}
+        hasSelection={!!selectionPath}
+        onFillSelection={fillSelection}
+        onDeselectSelection={deselectSelection}
       />
       {storageError && <div className="save-error-banner" role="alert">⚠️ {storageError}</div>}
       {imageImportError && <div className="save-error-banner" role="alert">⚠️ {imageImportError}</div>}
@@ -350,6 +377,8 @@ export default function App() {
           selectedImageId={selectedImageId}
           onSelectImage={setSelectedImageId}
           onUpdateImage={updateImage}
+          selectionPath={selectionPath}
+          onSelectionChange={setSelectionPath}
         />
         <LayerPanel
           layers={drawing.document.layers}
