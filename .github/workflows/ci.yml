@@ -21,6 +21,8 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Build
         run: npm run build
+      - name: Unit tests
+        run: npm run test:unit
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
       - name: E2E tests
