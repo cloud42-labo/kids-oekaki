@@ -61,6 +61,18 @@ function validateHistory(history: DrawingHistory | undefined) {
   }
 }
 
+// Thrown only by upgradeSchemaVersion's final branch below, so callers can
+// tell "this build structurally cannot read this version" apart from any
+// other failure (e.g. a QuotaExceededError from image-asset migration) —
+// see the dedicated catch in listDrawingSessions, which must never treat an
+// UnsupportedSchemaVersionError the same way it treats those other,
+// retry-safe failures (Codex review finding, PR #27 current-head: a prior,
+// overly-broad catch there let an unreadable newer-schema session through
+// as if it were ordinary rawValue, so it could be opened and autosaved —
+// relabeling and silently overwriting it with this older build's
+// SCHEMA_VERSION).
+class UnsupportedSchemaVersionError extends Error {}
+
 // Rejects anything this build doesn't know how to read (older than
 // MIN_READABLE_SCHEMA_VERSION, or newer than SCHEMA_VERSION — e.g. saved by
 // a build with a feature this one predates) rather than silently
@@ -73,7 +85,7 @@ function upgradeSchemaVersion(value: StoredDrawingSession): StoredDrawingSession
   if (value.schemaVersion >= MIN_READABLE_SCHEMA_VERSION && value.schemaVersion < SCHEMA_VERSION) {
     return { ...value, schemaVersion: SCHEMA_VERSION };
   }
-  throw new Error('この保存データは新しい形式です。アプリを更新してから開いてください。');
+  throw new UnsupportedSchemaVersionError('この保存データは新しい形式です。アプリを更新してから開いてください。');
 }
 
 function defaultName(history: DrawingHistory, savedAt: string) {
@@ -322,29 +334,43 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
     const sessions = await Promise.all(
       entries
         .filter(({ key }) => typeof key === 'string' && key.startsWith(DRAFT_PREFIX))
-        .map(async ({ key, value: rawValue }) => {
+        .map(async ({ key, value: rawValue }): Promise<StoredDrawingSession | null> => {
           validateHistory(rawValue.history);
-          // migrateSessionIfNeeded can fail independently of whether
-          // rawValue itself is readable — most importantly a
-          // QuotaExceededError from migrateImageAssetsInSession's own
-          // storeImageAsset write into image-assets, which happens *before*
-          // the inline data-URL copies it's replacing are freed (so
-          // migrating one session temporarily needs room for both copies at
-          // once — exactly the population already near quota that this
-          // whole PR targets). Letting that throw propagate out of this
-          // map() would reject the surrounding Promise.all and discard
-          // EVERY session's listing, including ones that didn't even need
-          // migration (Codex review finding, PR #27). rawValue is still
-          // exactly as valid/readable as it was before this attempt —
-          // upgradeSchemaVersion is label-only and
-          // migrateImageAssetsInSession never mutates its input in place (it
-          // always returns a new object when something changed; see its own
-          // comment) — so falling back to it here is safe: this session
-          // just stays visible in its old, still-working (inline data URL
-          // and/or pre-upgrade schemaVersion) form, un-migrated and
-          // un-persisted, and migration is simply retried the next time this
-          // session loads.
-          const value = await migrateSessionIfNeeded(db, key, rawValue).catch(() => rawValue);
+          let value: StoredDrawingSession;
+          try {
+            value = await migrateSessionIfNeeded(db, key, rawValue);
+          } catch (error) {
+            if (error instanceof UnsupportedSchemaVersionError) {
+              // This build structurally cannot read this session (saved by
+              // a newer build) — rawValue is NOT a safe fallback here, since
+              // returning it would list the session as if it were ordinary,
+              // resumable, current-schema data, letting it be opened and
+              // then autosaved back with this older build's SCHEMA_VERSION
+              // (silently destroying whatever newer fields it had). Leave
+              // it out of the resumable list entirely rather than either
+              // crashing the whole listing or exposing it as falsely
+              // readable (Codex review finding, PR #27 current-head).
+              return null;
+            }
+            // Any other failure (most importantly a QuotaExceededError from
+            // migrateImageAssetsInSession's own storeImageAsset write into
+            // image-assets, which happens *before* the inline data-URL
+            // copies it's replacing are freed — so migrating one session
+            // temporarily needs room for both copies at once, exactly the
+            // population already near quota that this whole PR targets) is
+            // independent of whether rawValue itself is readable: rawValue
+            // is still exactly as valid/readable as it was before this
+            // attempt — upgradeSchemaVersion is label-only and
+            // migrateImageAssetsInSession never mutates its input in place
+            // (it always returns a new object when something changed; see
+            // its own comment) — so falling back to it here is safe. This
+            // session just stays visible in its old, still-working (inline
+            // data URL and/or pre-upgrade schemaVersion) form, un-migrated
+            // and un-persisted, and migration is simply retried the next
+            // time this session loads (original Codex review finding, PR
+            // #27 first round).
+            value = rawValue;
+          }
           return {
             ...value,
             name: normalizeName(value.name, value.history, value.savedAt),
@@ -352,7 +378,9 @@ export async function listDrawingSessions(): Promise<StoredDrawingSession[]> {
           };
         }),
     );
-    return sessions.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+    return sessions
+      .filter((session): session is StoredDrawingSession => session !== null)
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
   } finally {
     db.close();
   }

@@ -738,4 +738,82 @@ test.describe('image asset store (OEK-05-S04-T11)', () => {
     const assetsAfterOwnSave = await readStore<ImageAssetRow>(pageA, 'image-assets');
     expect(assetsAfterOwnSave.some((a) => a.id === assetId)).toBe(true);
   });
+
+  test('⑨ 未来のschemaVersionで保存されたデータは一覧に出ず、このビルドで開いて上書きされることもない', async ({ page }) => {
+    // Regression test for the Codex review finding on PR #27 current-head
+    // (reviewed commit 4639d41): the fix for test ⑥ above originally caught
+    // *every* migrateSessionIfNeeded failure and fell back to rawValue,
+    // including upgradeSchemaVersion's own rejection of a session saved by a
+    // newer build than this one (schemaVersion > SCHEMA_VERSION). That made
+    // such a session appear as an ordinary, resumable entry — openable, and
+    // then autosaved back with this older build's SCHEMA_VERSION, silently
+    // destroying whatever newer-schema fields it had. documentStorage.ts
+    // must tell that case (UnsupportedSchemaVersionError) apart from a
+    // retry-safe failure like a QuotaExceededError and simply leave it out
+    // of the list, not expose it as falsely readable.
+    await page.goto('/');
+    const futureId = 'future-schema-session-1';
+    const futureLayerId = 'future-schema-sketch';
+    const okId = 'future-ok-session-1';
+    const okLayerId = 'future-ok-sketch';
+    await seedRawSession(page, `draft:${futureId}`, {
+      schemaVersion: 5,
+      id: futureId,
+      name: 'future-schema',
+      savedAt: new Date().toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: DOC_WIDTH,
+          height: DOC_HEIGHT,
+          orientation: 'portrait',
+          template: 'blank',
+          activeLayerId: futureLayerId,
+          layers: [
+            { id: futureLayerId, name: 'したがき', visible: true, locked: false, opacity: 1, kind: 'draft', objects: [] },
+          ],
+        },
+      },
+    });
+    await seedRawSession(page, `draft:${okId}`, {
+      schemaVersion: 4,
+      id: okId,
+      name: 'future-ok',
+      savedAt: new Date(Date.now() - 1000).toISOString(),
+      history: {
+        past: [],
+        future: [],
+        present: {
+          width: DOC_WIDTH,
+          height: DOC_HEIGHT,
+          orientation: 'portrait',
+          template: 'blank',
+          activeLayerId: okLayerId,
+          layers: [
+            { id: okLayerId, name: 'したがき', visible: true, locked: false, opacity: 1, kind: 'draft', objects: [] },
+          ],
+        },
+      },
+    });
+
+    await page.reload();
+
+    // Only the readable (schemaVersion 4) session is listed — the
+    // schemaVersion-5 one must not appear as if it were ordinary, openable
+    // data, and must not have silently discarded the other session either.
+    await expect(page.locator('.saved-work-row')).toHaveCount(1);
+    await expect(page.locator('.saved-work-row')).toContainText('future-ok');
+
+    // Its raw record on disk must be completely untouched — still
+    // schemaVersion 5, not relabeled/overwritten by this build.
+    const sessionsAfterListing = await readStore<RawSessionRow & { id: string }>(page, 'drawing-sessions');
+    const futureRow = sessionsAfterListing.find((row) => row.id === futureId)!;
+    expect(futureRow.schemaVersion).toBe(5);
+
+    // The other session is still fully openable and usable, confirming the
+    // unreadable one didn't take the whole listing down with it.
+    await page.locator('.saved-work-row', { hasText: 'future-ok' }).locator('.saved-work-open').click();
+    await expect(page.locator('.creative-toolbar')).toBeVisible();
+  });
 });
