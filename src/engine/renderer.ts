@@ -1,6 +1,7 @@
 import type { BlurObject, DrawingDocument, DrawingLayer, DrawingObject, ImageObject, Point, StrokeObject } from '../domain/drawing';
 import { IMAGE_HANDLE_VISUAL_RADIUS } from '../domain/drawing';
 import { drawTemplate } from '../domain/templates';
+import { resolveImageSrc } from '../utils/imageAssetStore';
 
 export type ImageBox = { x: number; y: number; width: number; height: number };
 // While an image is selected (CanvasStage, 'image' tool mode), its box —
@@ -111,6 +112,60 @@ function readyImageElement(src: string): HTMLImageElement | undefined {
   return img && img.complete && img.naturalWidth > 0 ? img : undefined;
 }
 
+// `object.src` (OEK-05-S04-T11) is no longer necessarily something an <img>
+// can decode directly: it may be an "asset:<id>" reference that first needs
+// an async IndexedDB lookup (utils/imageAssetStore.ts's resolveImageSrc) to
+// find the actual bytes. This map tracks that in-flight lookup per src,
+// shared between every caller waiting on the same one (getImageElement,
+// preloadImageAsset) — without it, a second caller that finds `img` already
+// in `imageElements` (created by the first caller, whose own resolution is
+// still pending) would have no way to learn that the lookup eventually
+// failed (a dangling reference, or a transient IndexedDB error): no native
+// `error` event ever fires for an <img> whose `.src` was never assigned.
+// Resolves once `img.src` has been assigned (not once decoding/loading has
+// finished — that's still tracked separately via the native load/error
+// events, exactly as before this change); rejects if the asset lookup itself
+// failed, in which case `img.src` is never assigned at all.
+const assetResolutions = new Map<string, Promise<void>>();
+
+// Sources whose asset resolution has permanently failed (a dangling
+// `asset:` reference — no matching row in image-assets, not a transient
+// IndexedDB error) — see getImageElement's resolution-rejection handler
+// below for why this exists. Checked up front so a src already known to be
+// unresolvable short-circuits before ever creating a new Image / resolution
+// request for it again. Pruned by pruneImageCache on the same reachability
+// rule as the other caches: once the live document no longer references the
+// src at all, a later reappearance (e.g. the user undoes back to it) gets a
+// fresh attempt rather than being stuck with a stale failure.
+const failedImageSrcs = new Set<string>();
+
+// Creates (or reuses) the Image for `src` and kicks off resolving it to
+// something decodable, without blocking on that resolution — callers attach
+// their own load/error listeners afterward, exactly as when `img.src` used
+// to be assigned synchronously right here.
+function ensureImageElement(src: string): HTMLImageElement {
+  const existing = imageElements.get(src);
+  if (existing) return existing;
+  const img = new Image();
+  img.decoding = 'async';
+  imageElements.set(src, img);
+  const resolution = resolveImageSrc(src)
+    .then((resolved) => {
+      if (!resolved) throw new Error('画像データが見つかりませんでした');
+      img.src = resolved;
+    })
+    .catch((error) => {
+      // No `.src` was ever assigned, so no native `error` event will fire on
+      // `img` for this — clean up here instead, mirroring the native error
+      // handlers' own cleanup (see getImageElement/preloadImageAsset).
+      imageElements.delete(src);
+      assetResolutions.delete(src);
+      throw error;
+    });
+  assetResolutions.set(src, resolution);
+  return img;
+}
+
 // Drops decode-cache entries (and any still-pending redraw callback) for
 // sources no longer referenced by any image object in `document`. Without
 // this, every successful import/undo/delete/new-drawing leaves its decoded
@@ -163,6 +218,23 @@ function pruneImageCache(document: DrawingDocument) {
       pendingRedraws.delete(src);
     }
   }
+  // assetResolutions follows the same reachability rule as imageElements
+  // (including the pin) — it's bookkeeping for the same cache entry, just
+  // for the async "look the bytes up in IndexedDB" step ahead of decoding.
+  for (const src of assetResolutions.keys()) {
+    if (!liveSrcs.has(src) && !pinnedImageSrcs.has(src)) {
+      assetResolutions.delete(src);
+    }
+  }
+  // failedImageSrcs follows live-reachability alone (no pin check): once a
+  // src is unreachable from the live document, there's nothing left that
+  // could retry it anyway (pinned preloads only ever await an *already*
+  // in-flight resolution — see preloadImageAsset/preloadDocumentImages — they
+  // never call getImageElement, so they can't re-trigger the loop this guards
+  // against even if a pin outlives the src's presence here).
+  for (const src of failedImageSrcs) {
+    if (!liveSrcs.has(src)) failedImageSrcs.delete(src);
+  }
 }
 
 // Starts (or reuses) decoding `src` and resolves once it can be drawn.
@@ -170,19 +242,20 @@ function pruneImageCache(document: DrawingDocument) {
 export function preloadImageAsset(src: string): Promise<void> {
   const existing = readyImageElement(src);
   if (existing) return Promise.resolve();
+  const img = ensureImageElement(src);
+  const resolution = assetResolutions.get(src)!;
   return new Promise((resolve, reject) => {
-    let img = imageElements.get(src);
-    if (!img) {
-      img = new Image();
-      img.decoding = 'async';
-      imageElements.set(src, img);
-      img.src = src;
-    }
     img.addEventListener('load', () => resolve(), { once: true });
     img.addEventListener('error', () => {
       imageElements.delete(src);
       reject(new Error('画像を読み込めませんでした'));
     }, { once: true });
+    // Resolution can fail (dangling asset: reference, IndexedDB error)
+    // before `img.src` is ever assigned, in which case neither native
+    // listener above will ever fire — this is what unblocks that case.
+    resolution.catch((error) => {
+      reject(error instanceof Error ? error : new Error('画像を読み込めませんでした'));
+    });
   });
 }
 
@@ -235,16 +308,28 @@ export async function preloadDocumentImages(document: DrawingDocument): Promise<
 function getImageElement(target: CanvasRenderingContext2D, src: string, onReady: () => void): HTMLImageElement | undefined {
   const ready = readyImageElement(src);
   if (ready) return ready;
-  let img = imageElements.get(src);
-  if (!img) {
-    img = new Image();
-    img.decoding = 'async';
+  // Already known to be permanently unresolvable (a dangling asset:
+  // reference) — see the resolution-rejection handler below for how this
+  // gets set. Returning early here, without calling onReady or registering
+  // another pendingRedraws entry, is what stops the loop: onReady's only
+  // caller (drawImageObject, via renderDocument) would otherwise immediately
+  // re-render the same still-unresolved object, land back in this function,
+  // and (before this check existed) create a brand-new Image + resolution
+  // request for the same src, reject again, and call onReady again —
+  // forever, burning CPU and IndexedDB reads for a reference that can never
+  // succeed without the document itself changing (Codex review finding, PR
+  // #27). The object simply renders as "missing", exactly as it would while
+  // genuinely still decoding, until pruneImageCache clears this entry
+  // (document no longer references the src at all) or the object's `src` is
+  // reassigned to something else (a different cache key).
+  if (failedImageSrcs.has(src)) return undefined;
+  const isNewImage = !imageElements.has(src);
+  const img = ensureImageElement(src);
+  if (isNewImage) {
     img.addEventListener('error', () => {
       imageElements.delete(src);
       pendingRedraws.delete(src);
     }, { once: true });
-    imageElements.set(src, img);
-    img.src = src;
   }
   if (!pendingRedraws.has(src)) {
     pendingRedraws.set(src, new Map());
@@ -253,6 +338,31 @@ function getImageElement(target: CanvasRenderingContext2D, src: string, onReady:
       pendingRedraws.delete(src);
       callbacks?.forEach((callback) => callback());
     }, { once: true });
+    // Resolution (the async "find the bytes" step ahead of decoding — see
+    // ensureImageElement) can itself fail — a dangling asset: reference, or
+    // an IndexedDB error — before `img.src` is ever assigned, in which case
+    // neither the native `load` listener above nor this src's own `error`
+    // listener (attached only when this call created the Image — see
+    // isNewImage above) will ever fire. Treat that the same as a decode
+    // failure: drop the cache entry and still fire every registered
+    // target's callback *once*, so a dangling reference just renders as
+    // "missing" (the next renderDocument simply skips this object, same as
+    // any other not-yet-ready image) instead of leaving every waiting
+    // target blank forever. Recording the src in failedImageSrcs first is
+    // what keeps this a single notification instead of an unbounded loop:
+    // each fired callback is onReady, which re-renders and calls back into
+    // getImageElement for this same still-unresolved src — the early-return
+    // guard at the top of this function is what stops that re-render from
+    // creating yet another Image/resolution request (and another call to
+    // this very `.catch`) once this one has already settled (Codex review
+    // finding, PR #27).
+    assetResolutions.get(src)?.catch(() => {
+      failedImageSrcs.add(src);
+      imageElements.delete(src);
+      const callbacks = pendingRedraws.get(src);
+      pendingRedraws.delete(src);
+      callbacks?.forEach((callback) => callback());
+    });
   }
   pendingRedraws.get(src)!.set(target, onReady);
   return undefined;

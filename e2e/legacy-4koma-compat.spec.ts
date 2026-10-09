@@ -22,7 +22,6 @@ test.use({ viewport: { width: 900, height: 1300 } });
 // 旧来のfixed-50pxジオメトリのy座標と一致することを、実際のcanvas画素で検証する。
 
 const DB_NAME = 'kids-oekaki';
-const DB_VERSION = 1;
 const STORE_NAME = 'drawing-sessions';
 const DRAFT_PREFIX = 'draft:';
 const SCHEMA_VERSION = 2;
@@ -31,9 +30,14 @@ type SeedResult = { id: string; name: string };
 
 async function seedLegacy4KomaSession(page: Page): Promise<SeedResult> {
   return page.evaluate(
-    ({ dbName, dbVersion, storeName, draftPrefix, schemaVersion, width, height }) => {
+    ({ dbName, storeName, draftPrefix, schemaVersion, width, height }) => {
       return new Promise<{ id: string; name: string }>((resolve, reject) => {
-        const openRequest = indexedDB.open(dbName, dbVersion);
+        // No version passed: this always runs after a page.goto() (see call
+        // site below), so the app has already opened (and upgraded, if
+        // needed) the database — opening with an explicit, possibly-stale
+        // version here would throw a VersionError instead (see
+        // utils/db.ts's DB_VERSION history, OEK-05-S04-T11).
+        const openRequest = indexedDB.open(dbName);
         openRequest.onupgradeneeded = () => {
           const db = openRequest.result;
           if (!db.objectStoreNames.contains(storeName)) db.createObjectStore(storeName);
@@ -77,7 +81,7 @@ async function seedLegacy4KomaSession(page: Page): Promise<SeedResult> {
         openRequest.onerror = () => reject(openRequest.error ?? new Error('open failed'));
       });
     },
-    { dbName: DB_NAME, dbVersion: DB_VERSION, storeName: STORE_NAME, draftPrefix: DRAFT_PREFIX, schemaVersion: SCHEMA_VERSION, width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
+    { dbName: DB_NAME, storeName: STORE_NAME, draftPrefix: DRAFT_PREFIX, schemaVersion: SCHEMA_VERSION, width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
   );
 }
 

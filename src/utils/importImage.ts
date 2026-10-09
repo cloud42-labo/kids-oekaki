@@ -1,13 +1,18 @@
 // Reads a device photo picked via <input type="file"> and prepares it for
 // use as a draft-layer ImageObject: downscaled and re-encoded so a saved
-// document doesn't carry a multi-megabyte original (see documentStorage.ts —
-// the whole undo history, including this image's data URL, is written to
-// IndexedDB on every autosave).
+// document doesn't carry a multi-megabyte original, then stored exactly once
+// in IMAGE_ASSETS_STORE (see utils/imageAssetStore.ts) rather than inlined —
+// `src` below is already an asset: reference by the time this resolves, so
+// every undo-history snapshot that goes on to reference the same photo
+// (including every move/resize) copies only that short string, not the
+// image bytes (OEK-05-S04-T11).
+import { storeImageAsset } from './imageAssetStore';
+
 const MAX_DIMENSION = 1600;
 const JPEG_QUALITY = 0.85;
 
 export type DecodedDraftImage = {
-  src: string;
+  src: string; // asset: reference — see utils/imageAssetStore.ts
   naturalWidth: number;
   naturalHeight: number;
 };
@@ -46,7 +51,9 @@ export async function loadDraftImageFile(file: File): Promise<DecodedDraftImage>
     if (!ctx) throw new Error('画像を読み込めませんでした');
     ctx.drawImage(img, 0, 0, width, height);
 
-    return { src: canvas.toDataURL('image/jpeg', JPEG_QUALITY), naturalWidth: width, naturalHeight: height };
+    const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    const assetRef = await storeImageAsset(dataUrl);
+    return { src: assetRef, naturalWidth: width, naturalHeight: height };
   } finally {
     URL.revokeObjectURL(objectUrl);
   }

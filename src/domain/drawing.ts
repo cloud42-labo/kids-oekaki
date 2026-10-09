@@ -94,7 +94,15 @@ export type StampObject = {
 export type ImageObject = {
   id: string;
   type: 'image';
-  src: string; // downscaled data URL — see utils/importImage.ts
+  // An "asset:<hash>" reference into IMAGE_ASSETS_STORE (utils/importImage.ts
+  // stores the downscaled bytes there once via utils/imageAssetStore.ts), or
+  // — for a document saved before that store existed — a legacy inline data
+  // URL, which documentStorage.ts migrates into the asset store the next
+  // time that session loads. Either way, resolve this through
+  // utils/imageAssetStore.ts's resolveImageSrc() before treating it as
+  // something an <img> element can decode directly (engine/renderer.ts
+  // already does this).
+  src: string;
   x: number;
   y: number;
   width: number;

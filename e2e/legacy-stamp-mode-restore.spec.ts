@@ -35,7 +35,7 @@ test('mode:stampを持つ旧セッションを復元すると、安全なペン�
       settings: { mode: 'stamp', brush: 'eraser', stampKind: 'heart', color: '#111111', size: 8 },
     };
     await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');

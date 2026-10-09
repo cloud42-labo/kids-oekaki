@@ -129,7 +129,7 @@ async function seedLegacyDrawingSession(page: Page, id: string) {
     };
 
     return new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');
@@ -212,7 +212,7 @@ async function seedSketchDeletedDrawingSession(page: Page, id: string) {
     };
 
     return new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('drawing-sessions')) db.createObjectStore('drawing-sessions');
@@ -818,7 +818,7 @@ test.describe('draft layer image import', () => {
     await page.waitForTimeout(600);
 
     const thumbnail = await page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onsuccess = () => {
         const db = request.result;
         const tx = db.transaction('drawing-sessions', 'readonly');
@@ -862,7 +862,7 @@ test.describe('draft layer image import', () => {
   // eviction race between preloadDocumentImages() and the live editor's own
   // ordinary (pruning) render.
 
-  test('⑱ 保存データはschemaVersion 3で書き込まれ、再開・再保存しても3のまま保たれる', async ({ page }) => {
+  test('⑱ 保存データはschemaVersion 4で書き込まれ、再開・再保存しても4のまま保たれる', async ({ page }) => {
     // Regression test for the P2 schema-versioning finding: this PR added
     // the ImageObject DrawingObject variant but originally left
     // SCHEMA_VERSION unbumped at 2 (the version a pre-image-feature build
@@ -872,18 +872,20 @@ test.describe('draft layer image import', () => {
     // Actually running an older build of the app against the same
     // IndexedDB isn't practical inside this e2e suite, so this instead
     // confirms what is practically testable here: the current build writes
-    // schemaVersion 3, and correctly reads its own schemaVersion-3 records
-    // back unchanged across a resume + resave. (Test ⑩ above separately
-    // exercises the other half — that a genuine schemaVersion-2 legacy
-    // record, which predates this feature, still loads without the
-    // now-stricter version guard rejecting it.)
+    // schemaVersion 4 (bumped again from 3 by OEK-05-S04-T11's asset-store
+    // migration — see utils/documentStorage.ts's SCHEMA_VERSION comment),
+    // and correctly reads its own schemaVersion-4 records back unchanged
+    // across a resume + resave. (Test ⑩ above separately exercises the
+    // other half — that a genuine schemaVersion-2 legacy record, which
+    // predates this feature, still loads without the now-stricter version
+    // guard rejecting it.)
     await startBlankDrawing(page);
     await importSamplePhoto(page);
     await page.getByRole('button', { name: /保存/ }).click();
     await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
 
     const readSchemaVersion = () => page.evaluate(() => new Promise<number | undefined>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onsuccess = () => {
         const db = request.result;
         const tx = db.transaction('drawing-sessions', 'readonly');
@@ -898,7 +900,7 @@ test.describe('draft layer image import', () => {
       request.onerror = () => reject(request.error ?? new Error('failed to open db'));
     }));
 
-    expect(await readSchemaVersion()).toBe(3);
+    expect(await readSchemaVersion()).toBe(4);
 
     // Round-trips through a resume + resave unchanged (not bumped again,
     // not reset).
@@ -908,7 +910,7 @@ test.describe('draft layer image import', () => {
     await page.getByRole('button', { name: /保存/ }).click();
     await expect(page.getByRole('button', { name: /保存済/ })).toBeVisible();
 
-    expect(await readSchemaVersion()).toBe(3);
+    expect(await readSchemaVersion()).toBe(4);
   });
 
   test('⑲ PNGエクスポート中に画像をけしても、書き出されるPNGには取り込み時点の画像が反映される', async ({ page }) => {
@@ -1006,7 +1008,7 @@ test.describe('draft layer image import', () => {
     await expect.poll(async () => isCloseToRed(await canvasColorAt(page, DOC_WIDTH / 2, DOC_HEIGHT / 2))).toBe(false);
 
     const thumbnail = await page.evaluate(() => new Promise<string | undefined>((resolve, reject) => {
-      const request = indexedDB.open('kids-oekaki', 1);
+      const request = indexedDB.open('kids-oekaki');
       request.onsuccess = () => {
         const db = request.result;
         const tx = db.transaction('drawing-sessions', 'readonly');
