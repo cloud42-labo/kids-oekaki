@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import type { BlurObject, DrawingDocument, DrawingLayer, ImageObject, MangaPresetKind, Orientation, StrokeObject, TemplateKind } from '../domain/drawing';
+import type { BlurObject, DrawingDocument, DrawingLayer, FillObject, ImageObject, MangaPresetKind, Orientation, StrokeObject, TemplateKind } from '../domain/drawing';
 import { createInitialDocument, ensureDraftLayer } from '../domain/drawing';
 
 const MAX_HISTORY = 60;
@@ -50,7 +50,7 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
   // 複数のobjectを1回のhistory push(=1 Undo/Redo単位)でまとめて追加する。
   // ミラー描画で生成される「元のstroke」と「反転したstroke」のペアは、
   // これを使って1回のUndo/Redoで同時に消える/戻るようにする。
-  const appendObjectsToActiveLayer = useCallback((objects: Array<StrokeObject | BlurObject>) => {
+  const appendObjectsToActiveLayer = useCallback((objects: Array<StrokeObject | BlurObject | FillObject>) => {
     if (objects.length === 0) return;
     setHistory((h) => {
       const active = h.present.layers.find((layer) => layer.id === h.present.activeLayerId);
@@ -63,12 +63,17 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
   }, []);
 
   const appendToActiveLayer = useCallback(
-    (object: StrokeObject | BlurObject) => appendObjectsToActiveLayer([object]),
+    (object: StrokeObject | BlurObject | FillObject) => appendObjectsToActiveLayer([object]),
     [appendObjectsToActiveLayer],
   );
 
   const commitStroke = useCallback((stroke: StrokeObject) => appendToActiveLayer(stroke), [appendToActiveLayer]);
   const commitBlur = useCallback((blur: BlurObject) => appendToActiveLayer(blur), [appendToActiveLayer]);
+  // 投げ縄選択(settings.mode === 'selection')で確定した範囲を現在の色で塗る。
+  // strokeやblurと同じappendToActiveLayer経由でhistoryへ1件pushするだけなので、
+  // Undo/Redoは既存のpast/present/futureスナップショット機構がそのまま扱う
+  // (塗りを1回Undoすれば直前の状態へ、Redoすれば塗った状態へ戻る)。
+  const commitFill = useCallback((fill: FillObject) => appendToActiveLayer(fill), [appendToActiveLayer]);
   // ミラー描画モード用: strokeとその反転strokeを1 Undo/Redo単位でコミットする。
   const commitMirroredStroke = useCallback(
     (stroke: StrokeObject, mirroredStroke: StrokeObject) => appendObjectsToActiveLayer([stroke, mirroredStroke]),
@@ -223,6 +228,7 @@ export function useDrawingDocument(initialTemplate: TemplateKind = 'blank') {
     selectLayer,
     commitStroke,
     commitBlur,
+    commitFill,
     commitMirroredStroke,
     importDraftImage,
     updateImageObject,

@@ -8,7 +8,9 @@ import {
   mirrorPointAcrossAxis,
   mirrorStrokeAcrossAxis,
 } from '../domain/drawing';
-import type { ImageBox, ImageSelection } from '../engine/renderer';
+import type { SelectionPoint } from '../domain/selection';
+import { isSelectionUsable } from '../domain/selection';
+import type { ImageBox, ImageSelection, SelectionOverlay } from '../engine/renderer';
 import { renderDocument } from '../engine/renderer';
 
 type Props = {
@@ -21,6 +23,12 @@ type Props = {
   selectedImageId: string | null;
   onSelectImage: (id: string | null) => void;
   onUpdateImage: (id: string, box: ImageBox) => void;
+  // 確定済みの投げ縄選択(settings.mode === 'selection'のときだけ意味を持つ)。
+  // selectedImageIdと同じくApp.tsx側で保持するその場のUI状態で、Documentの
+  // 一部ではない。ドラッグ中の未確定な軌跡(selectionDraft、下記)は
+  // このコンポーネント内だけのローカル状態として持つ。
+  selectionPath: SelectionPoint[] | null;
+  onSelectionChange: (points: SelectionPoint[] | null) => void;
 };
 
 type ImageDrag = {
@@ -95,6 +103,8 @@ export function CanvasStage({
   selectedImageId,
   onSelectImage,
   onUpdateImage,
+  selectionPath,
+  onSelectionChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // documentは1セッション中テンプレートが変わらない(startで作り直すとCanvasStage
@@ -132,6 +142,12 @@ export function CanvasStage({
   const imageDragRef = useRef<ImageDrag | null>(null);
   const [imagePreview, setImagePreview] = useState<ImageBox | null>(null);
 
+  // 投げ縄選択(settings.mode === 'selection')のドラッグ中の軌跡。null = ドラッグ
+  // していない。非nullであること自体を「ドラッグ中」の判定にも使う
+  // (別途boolean refは持たない)。確定(pointerup)するとonSelectionChange経由で
+  // 親(App.tsx)のselectionPathへ渡し、ここはnullへ戻す。
+  const [selectionDraft, setSelectionDraft] = useState<SelectionPoint[] | null>(null);
+
   const activeLayer = useMemo(
     () => document.layers.find((layer) => layer.id === document.activeLayerId),
     [document],
@@ -161,13 +177,26 @@ export function CanvasStage({
     return null;
   }, [settings.mode, selectedImageId, imagePreview, document]);
 
+  // ドラッグ中の軌跡(未確定)があれば常にそれを優先して見せる(開いたまま、
+  // closed:false)。ドラッグ中でなければ、ツールが選択モードのときだけ
+  // 確定済みのselectionPathを(閉じた状態、closed:true)見せる。他のツール
+  // (ペン等)へ切り替えている間はselectionPathを保持したまま表示だけ消す
+  // ――選択モードへ戻ればまた見える、作品そのものを消したわけではない。
+  const selectionOverlay = useMemo<SelectionOverlay | null>(() => {
+    if (selectionDraft && selectionDraft.length > 0) return { points: selectionDraft, closed: false };
+    if (settings.mode === 'selection' && selectionPath && selectionPath.length > 0) {
+      return { points: selectionPath, closed: true };
+    }
+    return null;
+  }, [selectionDraft, settings.mode, selectionPath]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = get2dContext(canvas, canvasHasAlpha);
     if (!canvas || !ctx) return;
     const draftObjects = draft ? (mirrorDraft ? [draft, mirrorDraft] : [draft]) : null;
-    renderDocument(ctx, document, draftObjects, imageSelection);
-  }, [document, draft, mirrorDraft, imageSelection]);
+    renderDocument(ctx, document, draftObjects, imageSelection, { selectionOverlay });
+  }, [document, draft, mirrorDraft, imageSelection, selectionOverlay]);
 
   useEffect(() => () => {
     if (liveFrameRef.current !== null) cancelAnimationFrame(liveFrameRef.current);
@@ -223,6 +252,11 @@ export function CanvasStage({
     setMirrorDraft(null);
     imageDragRef.current = null;
     setImagePreview(null);
+    // ドラッグ中だった投げ縄選択の軌跡も取りやめる。確定済みの
+    // selectionPath(親が持つ)はここでは一切触らない――2本指ピンチ等に
+    // よる取りやめは「未確定の軌跡を捨てる」だけで、既存の確定選択を
+    // 消すものではない。
+    setSelectionDraft(null);
   };
 
   // Topmost (last in document order, across layers back-to-front)
@@ -447,6 +481,20 @@ export function CanvasStage({
       return;
     }
 
+    if (settings.mode === 'selection') {
+      if (shouldIgnorePointer(event)) return;
+      event.preventDefault();
+      const point = pointFromEvent(event);
+      activePointerId.current = event.pointerId;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      // 新しくドラッグを始めたら、まだ確定していない前回の軌跡は無い前提
+      // (pointerupで必ずnullへ戻す)。既存の確定済みselectionPathは、この
+      // 新しいドラッグが有効な範囲として確定するまでは変更しない
+      // (stopのisSelectionUsable判定を通るまで残り続ける)。
+      setSelectionDraft([{ x: point.x, y: point.y }]);
+      return;
+    }
+
     if (shouldIgnorePointer(event) || !activeLayer || activeLayer.locked || !activeLayer.visible) return;
     event.preventDefault();
 
@@ -560,6 +608,11 @@ export function CanvasStage({
 
     const points = pointsFromMoveEvent(event);
 
+    if (selectionDraft) {
+      setSelectionDraft((current) => (current ? [...current, ...points.map((point) => ({ x: point.x, y: point.y }))] : current));
+      return;
+    }
+
     const liveStroke = liveStrokeRef.current;
     if (liveStroke) {
       queueLiveSegments(points);
@@ -585,6 +638,16 @@ export function CanvasStage({
       const finalBox = imagePreview;
       setImagePreview(null);
       if (finalBox) onUpdateImage(imageDrag.id, finalBox);
+      return;
+    }
+
+    if (selectionDraft) {
+      const finalPoints = selectionDraft;
+      setSelectionDraft(null);
+      // 十分な面積を囲えていない(タップ/ほぼ直線)ドラッグは「選択なし」と
+      // して無視する――既存の確定済み選択(あれば)はそのまま残す。親へ
+      // 伝えるのは、実際に閉じた範囲として使える場合だけ。
+      if (isSelectionUsable(finalPoints)) onSelectionChange(finalPoints);
       return;
     }
 

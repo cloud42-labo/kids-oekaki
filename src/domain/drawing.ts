@@ -1,3 +1,5 @@
+import type { SelectionPoint } from './selection';
+
 export const CANVAS_WIDTH = 800;
 export const CANVAS_HEIGHT = 1131;
 
@@ -94,16 +96,42 @@ export type StampObject = {
 export type ImageObject = {
   id: string;
   type: 'image';
-  src: string; // downscaled data URL — see utils/importImage.ts
+  // An "asset:<hash>" reference into IMAGE_ASSETS_STORE (utils/importImage.ts
+  // stores the downscaled bytes there once via utils/imageAssetStore.ts), or
+  // — for a document saved before that store existed — a legacy inline data
+  // URL, which documentStorage.ts migrates into the asset store the next
+  // time that session loads. Either way, resolve this through
+  // utils/imageAssetStore.ts's resolveImageSrc() before treating it as
+  // something an <img> element can decode directly (engine/renderer.ts
+  // already does this).
+  src: string;
   x: number;
   y: number;
   width: number;
   height: number;
 };
 
-export type DrawingObject = StrokeObject | BlurObject | StampObject | ImageObject;
+// 投げ縄選択で囲んだ範囲だけを現在の色で塗る(OEK-05-S04-T06)。pathは
+// domain/selection.tsのSelectionPointの配列(x/y、筆圧は持たない)で、
+// 選択時にキャンバス座標系へ変換済みの閉じた多角形。マスクをラスター
+// (ビットマップ)として保存せず、ベクタ(点列)のまま保持することで、
+// 既存のstroke/stampと同じくDocumentを軽量に保つ。実際の塗り処理
+// (engine/renderer.tsのdrawFill)はこのpathからbuildClosedSelectionPath
+// (domain/selection.ts)でPath2Dを作り直し、その内側だけへfill()する。
+export type FillObject = {
+  id: string;
+  type: 'fill';
+  color: string;
+  path: SelectionPoint[];
+};
 
-export type ToolMode = 'brush' | 'stamp' | 'eyedropper' | 'image';
+export type DrawingObject = StrokeObject | BlurObject | StampObject | ImageObject | FillObject;
+
+// 'selection'は投げ縄選択ツール(OEK-05-S04-T06)。選択範囲そのものは
+// Document(保存データ)の一部ではなく、CanvasStage/App.tsxが持つ
+// その場のUI状態(selectedImageIdやmirrorEnabledと同じ扱い)。選択範囲を
+// 使って確定した色塗りだけがFillObjectとしてDocumentへ残る。
+export type ToolMode = 'brush' | 'stamp' | 'eyedropper' | 'image' | 'selection';
 
 export const STAMP_SIZE = 96;
 export const DEFAULT_BLUR_STRENGTH = 6;

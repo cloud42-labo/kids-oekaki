@@ -9,17 +9,20 @@ const LEGACY_CURRENT_KEY = 'current';
 const DRAFT_PREFIX = 'draft:';
 // v2: pre-draft-image-import format (every DrawingObject is a
 // stroke/blur/stamp). v3: adds the ImageObject variant (domain/drawing.ts)
-// for imported photos. A v2 document is always a valid v3 document (it can
-// never contain an image object), so it's safe to read-and-upgrade in place.
-// A v3 document is NOT safe for a client that only knows v2: that client's
-// object-rendering switch has no 'image' case, so it would silently treat an
-// ImageObject as an unrecognized stamp and the photo would vanish from the
-// canvas/exports while the user keeps editing and autosaving over it (Codex
-// review finding on PR #11, reviewed commit c43ce60a45). Bumping
-// SCHEMA_VERSION means a v2-only build's own (unchanged) strict `!==` guard
-// below now rejects a v3 document outright — "この保存データは新しい形式です"
-// — instead of misreading it.
-const SCHEMA_VERSION = 3;
+// for imported photos. v4 (OEK-05-S04-T06): adds the FillObject variant for
+// "fill the selected region with the current color" — same class of change
+// as v3's ImageObject, so the same reasoning applies one version further: a
+// v3 document is always a valid v4 document (it can never contain a fill
+// object), so it's safe to read-and-upgrade in place. A v4 document is NOT
+// safe for a client that only knows v3: that client's object-rendering
+// switch has no 'fill' case, so it would silently drop the filled color from
+// the canvas/exports while the user keeps editing and autosaving over it —
+// the exact v2/v3 risk already documented below (Codex review finding on PR
+// #11, reviewed commit c43ce60a45). Bumping SCHEMA_VERSION means an older
+// build's own (unchanged) strict `!==` guard below now rejects a newer
+// document outright — "この保存データは新しい形式です" — instead of
+// misreading it.
+const SCHEMA_VERSION = 4;
 // Oldest schemaVersion this build still reads (and upgrades on load). Only
 // v2 predates this build; anything older already got folded into v2 by
 // migrateLegacyCurrent() below before it could reach the versioned

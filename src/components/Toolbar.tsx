@@ -63,6 +63,11 @@ type Props = {
   hasDraftImage: boolean;
   isExportingPng: boolean;
   saveState: SaveState;
+  // 投げ縄選択(settings.mode === 'selection')の確定済み範囲があるかどうか。
+  // 「ぬる」「かいじょ」ボタンのdisabled判定に使う(範囲が無い間は押せない)。
+  hasSelection: boolean;
+  onFillSelection: () => void;
+  onDeselectSelection: () => void;
 };
 
 export function Toolbar({
@@ -81,6 +86,9 @@ export function Toolbar({
   hasDraftImage,
   isExportingPng,
   saveState,
+  hasSelection,
+  onFillSelection,
+  onDeselectSelection,
 }: Props) {
   const isPortrait = useIsPortraitViewport();
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -163,6 +171,40 @@ export function Toolbar({
           aria-hidden="true"
           tabIndex={-1}
         />
+        <button
+          type="button"
+          className={settings.mode === 'selection' ? 'compact-tool active' : 'compact-tool'}
+          onClick={() => setSettings({ ...settings, mode: 'selection' })}
+          aria-pressed={settings.mode === 'selection'}
+          title="はんいをせんたく"
+        >
+          <span className="compact-tool-icon" aria-hidden="true">⬚</span>
+          <span className="compact-tool-label">せんたく</span>
+        </button>
+        {settings.mode === 'selection' && (
+          <>
+            <button
+              type="button"
+              className="compact-tool"
+              onClick={onFillSelection}
+              disabled={!hasSelection}
+              title="せんたくしたところをぬる"
+            >
+              <span className="compact-tool-icon" aria-hidden="true">🪣</span>
+              <span className="compact-tool-label">ぬる</span>
+            </button>
+            <button
+              type="button"
+              className="compact-tool"
+              onClick={onDeselectSelection}
+              disabled={!hasSelection}
+              title="せんたくをかいじょ"
+            >
+              <span className="compact-tool-icon" aria-hidden="true">✕</span>
+              <span className="compact-tool-label">かいじょ</span>
+            </button>
+          </>
+        )}
         <button
           type="button"
           className={mirrorEnabled ? 'compact-tool active' : 'compact-tool'}
